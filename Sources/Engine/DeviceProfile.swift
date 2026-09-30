@@ -63,6 +63,37 @@ final class DeviceProfile: ObservableObject {
 
     var recommendedGB: Double { Self.recommended(for: totalGB) }
 
+    /// 引擎上报的当前实际占用（GB）
+    @Published var usedGB: Double = 0
+
+    /// 进程实际物理内存占用（GB）
+    var footprintGB: Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / 4)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? Double(info.resident_size) / 1_073_741_824.0 : 0
+    }
+
+    /// 引擎上报优先；引擎未接时用进程真实占用兜底
+    var effectiveUsedGB: Double { usedGB > 0 ? usedGB : footprintGB }
+
+    /// 内存利用率 = 实际占用 / 已分配的内存预算（不是占总设备内存）
+    /// 例：分配 2.4 GB、实际跑到 2.0 GB → 83.3%
+    var usageRatio: Double {
+        guard budgetGB > 0 else { return 0 }
+        return min(effectiveUsedGB / budgetGB, 1.0)
+    }
+
+    /// 分配预算占设备总内存的比例
+    var budgetRatio: Double {
+        guard totalGB > 0 else { return 0 }
+        return min(budgetGB / totalGB, 1.0)
+    }
+
     var tier: Tier {
         switch budgetGB {
         case ..<1.5:  return .tiny
