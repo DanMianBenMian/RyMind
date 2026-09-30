@@ -1,0 +1,6 @@
+#ifndef RYMIND_BRIDGING_HEADER_H
+#define RYMIND_BRIDGING_HEADER_H
+
+#include "llama.h"
+
+#endif /* RYMIND_BRIDGING_HEADER_H */
