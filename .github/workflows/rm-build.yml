@@ -10,6 +10,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Build llama.cpp static libs (iOS arm64 + Metal)
+        run: |
+          set -e
+          git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama-src
+          cmake -S llama-src -B llama-build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_TOOLS=OFF \
+            -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_SERVER=OFF \
+            -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_BLAS=OFF -DGGML_ACCELERATE=OFF -DGGML_LLAMAFILE=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build llama-build --config Release --target llama -j$(sysctl -n hw.ncpu)
+          mkdir -p llama-libs llama-include
+          find llama-build -name "*.a" -exec cp {} llama-libs/ \;
+          find llama-src -name "*.h" -path "*include*" -exec cp {} llama-include/ \; 2>/dev/null || true
+          echo "--- libs ---";    ls -1 llama-libs
+          echo "--- headers ---"; ls -1 llama-include | head -20
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
