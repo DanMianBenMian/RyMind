@@ -11,7 +11,7 @@ targets:
     type: application
     platform: iOS
     sources:
-      - path: Sources
+      - Sources
     info:
       properties:
         CFBundleDisplayName: RyMind
