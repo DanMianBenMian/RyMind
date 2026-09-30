@@ -13,6 +13,7 @@ targets:
     sources:
       - Sources
     info:
+      path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
         CFBundleShortVersionString: "0.1.0"
