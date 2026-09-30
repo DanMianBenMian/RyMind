@@ -39,11 +39,18 @@ struct ChatView: View {
 
     private var header: some View {
         VStack(spacing: 6) {
-            HStack {
-                Text("Qwen2.5-1.5B · Max \(maxMode ? "开" : "关")")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(RMTheme.text)
+            HStack(spacing: 8) {
+                ModelPicker(kind: .llm)
                 Spacer()
+                Button { maxMode.toggle() } label: {
+                    Text(maxMode ? "Max 开" : "Max 关")
+                        .font(.system(size: 11))
+                        .foregroundStyle(maxMode ? Color(hex: 0x0B1F1B) : RMTheme.textSub)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(maxMode ? RMTheme.accent : RMTheme.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                }
                 Text(String(format: "上下文已用 %.1fk / %.0fk", usedK, windowK))
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.accent)
