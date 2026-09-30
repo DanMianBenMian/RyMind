@@ -11,7 +11,7 @@ struct PerfView: View {
                 LazyVGrid(columns: columns, spacing: 12) {
                     metricCard("生成速度", value: "18.4", unit: "tok/s")
                     metricCard("内存利用率",
-                               value: String(format: "%.0f", device.memoryUsageRatio * 100),
+                               value: String(format: "%.1f", device.usageRatio * 100),
                                unit: "%")
                     metricCard("Metal 加速", value: "已启用", unit: "")
                     metricCard("上下文占用", value: "39", unit: "%")
@@ -68,10 +68,10 @@ struct PerfView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
                 Spacer()
-                Text(String(format: "推荐 %.1f GB · 默认 %.1f GB",
-                            device.recommendedGB, device.recommendedGB))
+                Text(String(format: "已用 %.2f GB / 已分配 %.1f GB",
+                            device.effectiveUsedGB, device.budgetGB))
                     .font(.system(size: 11))
-                    .foregroundStyle(RMTheme.textSub)
+                    .foregroundStyle(RMTheme.accent)
                 Spacer()
                 Text(String(format: "上限 %.1f GB（设备总内存）", device.totalGB))
                     .font(.system(size: 11))
@@ -81,7 +81,7 @@ struct PerfView: View {
             Button {
                 device.budgetGB = device.recommendedGB
             } label: {
-                Text("恢复推荐值")
+                Text(String(format: "恢复推荐值（%.1f GB）", device.recommendedGB))
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.accent)
             }
