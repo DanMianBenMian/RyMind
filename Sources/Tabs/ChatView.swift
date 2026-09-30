@@ -1,14 +1,21 @@
 import SwiftUI
 
 struct ChatMessage: Identifiable {
-    let id = UUID()
-    let text: String
+    let id: UUID
+    var text: String
     let isUser: Bool
+
+    init(id: UUID = UUID(), text: String, isUser: Bool) {
+        self.id = id
+        self.text = text
+        self.isUser = isUser
+    }
 }
 
 struct ChatView: View {
     @EnvironmentObject private var lock: TaskLock
     @EnvironmentObject private var device: DeviceProfile
+    @EnvironmentObject private var store: ModelStore
 
     @State private var input = ""
     @State private var messages: [ChatMessage] = [
@@ -16,11 +23,10 @@ struct ChatView: View {
         .init(text: "已读取工作空间 3 个文件，正在生成…", isUser: false),
         .init(text: "加上内存占用那段", isUser: true)
     ]
-    @State private var usedK: Double = 12.4
+    @State private var usedK: Double = 0
     @State private var maxMode = false
+    @State private var statusLine = "未加载模型"
 
-    /// 存档容量（Max 模式 1000k）；实际送进模型的是检索出的片段
-    private var archiveK: Double { maxMode ? 1000 : Double(device.tier.ctxTokens) / 1024.0 }
     private var windowK: Double { Double(device.tier.ctxTokens) / 1024.0 }
 
     var body: some View {
@@ -57,6 +63,10 @@ struct ChatView: View {
             }
             ProgressView(value: min(usedK, windowK), total: max(windowK, 1))
                 .tint(RMTheme.accent)
+            Text(statusLine)
+                .font(.system(size: 11))
+                .foregroundStyle(RMTheme.textSub)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -80,7 +90,6 @@ struct ChatView: View {
         HStack(spacing: 8) {
             Menu {
                 Button { } label: { Label("添加图片", systemImage: "photo") }
-                Button { } label: { Label("添加 Skill", systemImage: "square.stack.3d.down.right") }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 14, weight: .medium))
@@ -111,16 +120,70 @@ struct ChatView: View {
         .background(RMTheme.rail)
     }
 
+    private func append(_ id: UUID, _ s: String) {
+        guard let i = messages.firstIndex(where: { $0.id == id }) else { return }
+        messages[i].text += s
+    }
+
     private func send() {
-        guard !input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // 与生图互斥
+        let q = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return }
         guard lock.acquire(.chat) else { return }
-        messages.append(.init(text: input, isUser: true))
+
+        messages.append(ChatMessage(text: q, isUser: true))
         input = ""
-        // TODO: 接推理引擎（含关键词筛 + 档位自适应）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
-            messages.append(.init(text: "（推理引擎尚未接入）", isUser: false))
+
+        // 任务路由：只挑命中的那一个模型去加载
+        guard let m = store.route(for: q) else {
+            messages.append(ChatMessage(text: "（没有可用模型，去「库 → 模型」下载一个）", isUser: false))
             lock.release(.chat)
+            return
+        }
+        if m.isMoE {
+            statusLine = "命中 \(m.name)（MoE：每次只激活部分专家）"
+        } else {
+            statusLine = "命中 \(m.name)，其余模型未加载"
+        }
+
+        let botId = UUID()
+        messages.append(ChatMessage(id: botId, text: "", isUser: false))
+
+        let ctxTokens = device.tier.ctxTokens
+        let gpuLayers = device.tier.gpuLayers
+        let path = store.localPath(for: m)
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ok = LlamaEngine.shared.load(modelId: m.id,
+                                             path: path,
+                                             ctxTokens: ctxTokens,
+                                             gpuLayers: gpuLayers,
+                                             sizeGB: m.sizeGB)
+            if !ok {
+                DispatchQueue.main.async {
+                    append(botId, "（模型文件不存在，去「库 → 模型」下载 \(m.name) 后重试）")
+                    statusLine = "模型未下载"
+                    lock.release(.chat)
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                device.usedGB = LlamaEngine.shared.loadedSizeGB
+                statusLine = "\(m.name) 已加载（mmap 惰性载入，未跑到部分可被回收）"
+            }
+
+            _ = LlamaEngine.shared.generate(prompt: q, maxTokens: 256) { piece in
+                DispatchQueue.main.async {
+                    append(botId, piece)
+                }
+            }
+
+            DispatchQueue.main.async {
+                usedK = Double(LlamaEngine.shared.activeTokens) / 1024.0
+                device.usedGB = device.footprintGB
+                statusLine = "完成 · 仍只加载 \(m.name)"
+                lock.release(.chat)
+            }
         }
     }
 }
