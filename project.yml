@@ -35,3 +35,8 @@ targets:
       PROVISIONING_PROFILE_SPECIFIER: ""
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
       ENABLE_BITCODE: NO
+      # ---- llama.cpp（workflow 里 cmake 编好的 iOS 静态库 + 头文件）----
+      SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridge/RyMind-Bridging-Header.h
+      HEADER_SEARCH_PATHS: $(PROJECT_DIR)/llama-include
+      LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/llama-libs
+      OTHER_LDFLAGS: -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lc++ -framework Accelerate -framework Metal -framework MetalKit
