@@ -12,10 +12,8 @@ struct ImageGenView: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            HStack {
-                Text("生图 · 本地离线")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(RMTheme.text)
+            HStack(spacing: 8) {
+                ModelPicker(kind: .image)
                 Spacer()
                 if lock.holder == .image {
                     Text("生成中")
