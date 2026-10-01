@@ -16,7 +16,7 @@ struct ImageGenView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var reference: UIImage?
     @State private var results: [UIImage] = []
-    @State private var preview: UIImage?
+    @State private var previewItem: LoadedImage?
     @State private var note = ""
 
     private let sizes = [384, 512, 768]
@@ -162,7 +162,7 @@ struct ImageGenView: View {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
                                     ForEach(Array(results.enumerated()), id: \.offset) { _, img in
-                                        Button { preview = img } label: {
+                                        Button { previewItem = LoadedImage(img: img) } label: {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFill()
@@ -185,7 +185,7 @@ struct ImageGenView: View {
             }
         }
         .background(RMTheme.bg)
-        .sheet(item: $previewBinding) { img in ImagePreviewSheet(img: img) }
+        .sheet(item: $previewItem) { item in ImagePreviewSheet(img: item.img) }
         .onChange(of: photoItem) { item in
             guard let item = item else { return }
             Task {
@@ -196,11 +196,6 @@ struct ImageGenView: View {
         }
     }
 
-    // UIImage 不是 Identifiable，包一层给 sheet(item:) 用
-    private var previewBinding: Binding<LoadedImage?> {
-        Binding(get: { preview.map { LoadedImage(img: $0) } },
-                set: { preview = $0?.img })
-    }
 
     // MARK: - 生成
 
