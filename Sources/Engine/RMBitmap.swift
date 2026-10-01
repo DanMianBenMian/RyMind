@@ -188,37 +188,48 @@ struct RMBitmap {
     // MARK: - 绘制
 
     fileprivate static func drawBuffer(_ buf: [UInt8], size: Int) -> UIImage? {
-        guard let cg = cgFromBuffer(buf, size: size) else { return nil }
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
-                                  bytesPerRow: size * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return nil }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
-        return ctx.makeImage().flatMap { UIImage(cgImage: $0) }
+        guard let img = cgFromBuffer(buf, size: size) else { return nil }
+        return UIImage(cgImage: img)
     }
 
+    /// ⚠️ 别用 `CGDataProvider(data: Data(...))`：Swift 的 Data 不一定连续字节，
+    /// 一旦不连续 CG 就拿到错数据（图会黑/花）。这里自己 malloc 一块、直接把 buffer 拷进去。
     private static func cgFromBuffer(_ buf: [UInt8], size: Int) -> CGImage? {
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let data = Data(buf)
-        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
-        return CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32,
-                       bytesPerRow: size * 4, space: cs,
-                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
-                       provider: provider, decode: nil, shouldInterpolate: true,
-                       intent: .defaultIntent)
+        let bytes = size * 4
+        guard let mem = malloc(bytes) else { return nil }
+        memcpy(mem, buf, bytes)
+        defer { free(mem) }
+        guard let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
+                                  bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneLast.rawValue)
+        else { return nil }
+        return ctx.makeImage()
     }
 
+    /// 小图放大到目标尺寸。
+    /// ⚠️⚠️ 绝对不要用 `UIGraphicsImageRenderer`：它不是线程安全的，
+    /// 从后台线程（出图任务跑的那条）一调就崩 —— 这就是"点生成直接闪退"的真凶。
+    /// 这里换成纯 CoreGraphics：自己申请 buffer 画一次 makeImage()，任何线程都能用。
     fileprivate static func upscale(_ img: UIImage, to size: Int) -> UIImage? {
-        let fmt = UIGraphicsImageRendererFormat()
-        fmt.scale = 1
-        fmt.opaque = true
-        fmt.preferredRange = .standard
-        let rend = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: fmt)
-        return rend.image { ctx in
-            ctx.cgContext.interpolationQuality = CGInterpolationQuality.high
-            img.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
+        guard let src = img.cgImage else { return nil }
+        let bytes = size * 4
+        guard let mem = malloc(bytes) else { return nil }
+        defer { free(mem) }
+        let ok = mem.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
+            guard let base = ptr.baseAddress else { return false }
+            guard let ctx = CGContext(data: base, width: size, height: size, bitsPerComponent: 8,
+                                      bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneLast.rawValue)
+            else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
+            return true
         }
+        guard ok, let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
+                                      bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneLast.rawValue),
+              let big = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: big)
     }
 
     /// 把参考图缩到 small×small，取每点的亮度和颜色。
