@@ -181,7 +181,7 @@ struct FilesView: View {
                 .tint(RMTheme.accent)
             Button("剪切") { fs.putClipboard(cut: true, name: item.name) }
                 .tint(RMTheme.warn)
-            Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
+            Button("删除", role: .destructive) { fs.remove(name: item.name) }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button("重命名") {
