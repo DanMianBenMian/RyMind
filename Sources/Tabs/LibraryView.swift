@@ -65,16 +65,24 @@ struct LibraryView: View {
         HStack {
             Text("库").font(.system(size: 15, weight: .medium)).foregroundStyle(RMTheme.text)
             Spacer()
-            Button { showAdd = true } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 14, weight: .medium))
-                    .foregroundStyle(RMTheme.accent)
-                    .frame(width: 26, height: 26)
-                    .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
+            // 加号按段走：模型 = 加自定义模型；Skill = 上传 Skill 文件；文件段由文件页自己带 +
+            if segment != .files {
+                Button { addTapped() } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(RMTheme.accent)
+                        .frame(width: 26, height: 26)
+                        .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
+                }
             }
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
+    }
+
+    private func addTapped() {
+        if segment == .skills { showSkillPick = true }
+        else { showAdd = true }
     }
 
     // MARK: - 模型
