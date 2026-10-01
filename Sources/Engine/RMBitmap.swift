@@ -111,14 +111,14 @@ struct RMBitmap {
                     let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
                     col = (base.r * bright, base.g * bright, base.b * bright)
                     // 叠一点调色板的环境色，免得看过去还是原图
-                    let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                    let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
                     let p = pal[pIdx]
                     let mix: Float = 0.30
                     col = (col.r * (1 - mix) + p.r * mix,
                            col.g * (1 - mix) + p.g * mix,
                            col.b * (1 - mix) + p.b * mix)
                 } else {
-                    let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                    let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
                     let p0 = pal[pIdx]
                     let p1 = pal[min(pal.count - 1, pIdx + 1)]
                     let frac = Double(t * Double(pal.count - 1)) - Double(pIdx)
@@ -128,9 +128,9 @@ struct RMBitmap {
                 }
 
                 let o = i * 4
-                buf[o]     = UInt8(max(0, min(255, Int(col.r * 255))))
-                buf[o + 1] = UInt8(max(0, min(255, Int(col.g * 255))))
-                buf[o + 2] = UInt8(max(0, min(255, Int(col.b * 255))))
+                buf[o]     = byte(col.r * 255)
+                buf[o + 1] = byte(col.g * 255)
+                buf[o + 2] = byte(col.b * 255)
                 buf[o + 3] = 255
             }
         }
@@ -146,11 +146,35 @@ struct RMBitmap {
         return s >> 33
     }
 
+    /// ⚠️ 坐标可能是负数（ox/oy 取 -28…+28.7，靠近 0 的像素 fbm 坐标就是负的），
+    /// 而 `UInt64(-3)` 在 Swift 里是**非法转换会直接 trap**（EXC_BREAKPOINT / SIGTRAP）。
+    /// 这里必须用 `bitPattern:` 按位重解释，拿补码当无符号用 —— 乘法/掩码语义完全一样，且永不 trap。
     private static func hash(_ x: Int, _ y: Int, _ seed: UInt64) -> Double {
-        var h = UInt64(x) &* 374761393 &+ UInt64(y) &* 668265263 &+ seed
+        var h = UInt64(bitPattern: x) &* 374761393
+        h &+= UInt64(bitPattern: y) &* 668265263
+        h &+= seed
         h = (h ^ (h >> 13)) &* 1274126177
         h = h ^ (h >> 16)
         return Double(h & 0xFFFF) / 65535.0
+    }
+
+    /// Double → Int 的安全转换：NaN / Inf / 超范围都不 trap，直接钉到边界。
+    /// （`Int(someDouble)` 在 NaN、Inf、或超出 Int 范围时同样是 Swift trap，出图循环里绝不能出现）
+    private static func asInt(_ d: Double) -> Int {
+        if d.isNaN { return 0 }
+        if d.isInfinite { return d > 0 ? Int.max : Int.min }
+        if d >= Double(Int.max) { return Int.max }
+        if d <= Double(Int.min) { return Int.min }
+        return Int(d)
+    }
+
+    /// Double → 0…255 字节：NaN / Inf 兜底，永不 trap。
+    private static func byte(_ d: Double) -> UInt8 {
+        if d.isNaN { return 0 }
+        if d.isInfinite { return d > 0 ? 255 : 0 }
+        if d <= 0 { return 0 }
+        if d >= 255 { return 255 }
+        return UInt8(d)
     }
 
     private static func smooth(_ t: Double) -> Double {
@@ -158,7 +182,7 @@ struct RMBitmap {
     }
 
     private static func valueNoise(x: Double, y: Double, seed: UInt64) -> Double {
-        let xi = Int(x), yi = Int(y)
+        let xi = asInt(x), yi = asInt(y)
         let xf = x - Double(xi), yf = y - Double(yi)
         let u = smooth(xf), v = smooth(yf)
         let a = hash(xi, yi, seed)
@@ -175,7 +199,7 @@ struct RMBitmap {
         var sum = 0.0
         var norm = 0.0
         for i in 0..<octaves {
-            sum += valueNoise(x: x * freq, y: y * freq, seed: seed &+ UInt64(i * 7919)) * amp
+            sum += valueNoise(x: x * freq, y: y * freq, seed: seed &+ UInt64(bitPattern: i * 7919)) * amp
             norm += amp
             amp *= 0.5
             freq *= 2.05
@@ -367,14 +391,14 @@ final class RMPixelJob {
                 let detail: Double = 0.55 + f1 * 0.5 - 0.25
                 let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
                 col = (base.r * bright, base.g * bright, base.b * bright)
-                let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
                 let p = pal[pIdx]
                 let mix: Float = 0.30
                 col = (col.r * (1 - mix) + p.r * mix,
                        col.g * (1 - mix) + p.g * mix,
                        col.b * (1 - mix) + p.b * mix)
             } else {
-                let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
                 let p0 = pal[pIdx]
                 let p1 = pal[min(pal.count - 1, pIdx + 1)]
                 let frac = Double(t * Double(pal.count - 1)) - Double(pIdx)
@@ -384,9 +408,9 @@ final class RMPixelJob {
             }
 
             let o = i * 4
-            buf[o]     = UInt8(max(0, min(255, Int(col.r * 255))))
-            buf[o + 1] = UInt8(max(0, min(255, Int(col.g * 255))))
-            buf[o + 2] = UInt8(max(0, min(255, Int(col.b * 255))))
+            buf[o]     = byte(col.r * 255)
+            buf[o + 1] = byte(col.g * 255)
+            buf[o + 2] = byte(col.b * 255)
             buf[o + 3] = 255
         }
     }
