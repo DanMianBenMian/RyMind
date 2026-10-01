@@ -16,8 +16,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
-        CFBundleShortVersionString: "0.2.0"
-        CFBundleVersion: "3"
+        CFBundleShortVersionString: "0.3.0"
+        CFBundleVersion: "4"
         LSRequiresIPhoneOS: true
         UIRequiredDeviceCapabilities:
           - arm64
@@ -39,4 +39,4 @@ targets:
       SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridge/RyMind-Bridging-Header.h
       HEADER_SEARCH_PATHS: $(PROJECT_DIR)/llama-include
       LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/llama-libs
-      OTHER_LDFLAGS: -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lc++ -framework Accelerate -framework Metal -framework MetalKit
+      OTHER_LDFLAGS: -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lz -lc++ -framework Accelerate -framework Metal -framework MetalKit
