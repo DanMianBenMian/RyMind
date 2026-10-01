@@ -67,9 +67,9 @@ final class DeviceProfile: ObservableObject {
     @Published var usedGB: Double = 0
 
     /// Metal（GPU）总开关。手动关掉后置 0 层，推理走纯 CPU——内存和发热都降，但会慢。
-    @Published var metalEnabled: Bool {
-        get { UserDefaults.standard.bool(forKey: "rymind.metalEnabled") }
-        set { UserDefaults.standard.set(newValue, forKey: "rymind.metalEnabled") }
+    /// ⚠️ @Published 不能挂在 computed property 上，所以用存储属性 + didSet 落盘。
+    @Published var metalEnabled: Bool = true {
+        didSet { UserDefaults.standard.set(metalEnabled, forKey: "rymind.metalEnabled") }
     }
 
     /// 实际送进 llama 的 GPU 层数（关 Metal 就是 0）
