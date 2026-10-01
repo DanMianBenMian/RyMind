@@ -233,9 +233,11 @@ struct ImageGenView: View {
 
         let job = RMPixelJob(opt: RMPixelJob.Opt(size: sz, seed: sd, style: st,
                                                  paletteName: pal, reference: ref))
+        RMTrace.shared.log("生图开始 size=\(sz) style=\(st) pal=\(pal) ref=\(ref != nil) seed=\(sd)", tag: "image")
         DispatchQueue.global(qos: .userInitiated).async {
             var finished: UIImage? = nil
             var ticks = 0
+            var stepErr = ""
             // 分片出图：算一小片 → 回报一次进度 → 让出一次线程（界面不会像卡死，也随时能停）
             while job.step(rows: 8) {
                 if token.isCancelled { break }
@@ -249,8 +251,11 @@ struct ImageGenView: View {
                 }
                 Thread.sleep(forTimeInterval: 0.012)
             }
+            // 崩过 3 次的活儿：每一步都留痕，真崩了至少知道死在 step 还是 makeImage
+            RMTrace.shared.log("像素循环结束 ticks=\(ticks) cancelled=\(token.isCancelled) err=\(stepErr)", tag: "image")
             if !token.isCancelled {
                 finished = job.makeImage()
+                RMTrace.shared.log("makeImage 完成 img=\(finished != nil)", tag: "image")
             }
             let out = finished
             let cancelled = token.isCancelled
