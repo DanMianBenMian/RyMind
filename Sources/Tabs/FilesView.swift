@@ -19,9 +19,10 @@ struct FilesView: View {
     @State private var folderName = ""
     @State private var showNewFile = false
     @State private var fileName = ""
-    @State private var showMove = false
-    @State private var moveMode = 0     // 0 = 移动, 1 = 复制
-    @State private var moveItem: RMFileEntry?
+    // 多选：点文件 = 选中/取消选中；点文件夹 = 进去。工具栏同时显示「已选 N 项」
+    @State private var selected = Set<String>()
+    @State private var multiMode = false
+    @State private var confirmDelete = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -33,7 +34,17 @@ struct FilesView: View {
         .sheet(isPresented: $showPicker) { DocPicker { url in fs.upload(from: url) } }
         .sheet(item: $detail) { FileDetailView(item: $0) }
         .sheet(isPresented: $showTerminal) { TerminalView() }
-        .sheet(isPresented: $showMove) { moveSheet }
+        // 批量删除确认（删了就找不回来，别手抖）
+        .alert("删除 \(selected.count) 项？", isPresented: $confirmDelete) {
+            Button("删除", role: .destructive) {
+                fs.remove(names: Array(selected))
+                selected.removeAll()
+                multiMode = false
+            }
+            Button("取消", role: .cancel) { selected.removeAll() }
+        } message: {
+            Text("这些文件和文件夹会被永久删掉，没法撤销。")
+        }
         .alert("新建文件夹", isPresented: $showNewFolder) {
             TextField("名称", text: $folderName)
             Button("创建") {
@@ -115,7 +126,7 @@ struct FilesView: View {
     }
 
     private var toolbar: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: 12) {
             Menu {
                 Button("上传文件") { showPicker = true }
                 // 不一定要上传：直接在这儿建新文件，建完立刻点开写
@@ -129,17 +140,35 @@ struct FilesView: View {
                     .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
             }
 
-            Button { moveMode = 0; moveItem = nil; showMove = true } label: {
-                Text("移动").font(.system(size: 12)).foregroundStyle(RMTheme.text)
+            // 多选开关（移动/复制那两个按钮已经删掉，用「选」代替）
+            Button {
+                multiMode.toggle()
+                if !multiMode { selected.removeAll() }
+            } label: {
+                Label("选", systemImage: multiMode ? "checkmark.circle.fill" : "checkmark.circle")
+                    .font(.system(size: 12))
+                    .foregroundStyle(multiMode ? RMTheme.accent : RMTheme.text)
             }
-            Button { moveMode = 1; moveItem = nil; showMove = true } label: {
-                Text("复制").font(.system(size: 12)).foregroundStyle(RMTheme.text)
-            }
+
             Button(action: { fs.paste() }) {
                 Text("粘贴").font(.system(size: 12)).foregroundStyle(fs.hasClipboard ? RMTheme.text : RMTheme.textSub)
             }
             .disabled(!fs.hasClipboard)
+
+            if multiMode {
+                Button("全选") { selected = Set(fs.entries.map { $0.name }) }
+                    .font(.system(size: 12))
+                Button("清空") { selected.removeAll() }
+                    .font(.system(size: 12))
+                Button("删除选中（\(selected.count)）") { confirmDelete = true }
+                    .font(.system(size: 12))
+                    .foregroundStyle(selected.isEmpty ? RMTheme.textSub : RMTheme.danger)
+                    .disabled(selected.isEmpty)
+            }
             Spacer()
+            Text(multiMode && !selected.isEmpty ? "已选 \(selected.count) 项" : "")
+                .font(.system(size: 11))
+                .foregroundStyle(RMTheme.accent)
             Button { showTerminal = true } label: {
                 Label("终端", systemImage: "terminal")
                     .font(.system(size: 12))
@@ -168,7 +197,14 @@ struct FilesView: View {
     }
 
     private func fileRow(_ item: RMFileEntry) -> some View {
+        let picked = selected.contains(item.name)
         HStack(spacing: 10) {
+            if multiMode {
+                Image(systemName: picked ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 13))
+                    .foregroundStyle(picked ? RMTheme.accent : RMTheme.textSub)
+                    .frame(width: 18)
+            }
             Image(systemName: item.isDir ? "folder.fill" : "doc.fill")
                 .font(.system(size: 14))
                 .foregroundStyle(item.isDir ? RMTheme.accent : RMTheme.textSub)
@@ -178,7 +214,7 @@ struct FilesView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(RMTheme.text)
                     .lineLimit(1)
-                Text(item.isDir ? "文件夹" : "\(item.size) 字节 · \(TimeFmt.string(from: item.modified))")
+                Text(item.isDir ? "文件夹 · \(TimeFmt.string(from: item.modified))" : "\(item.size) 字节 · \(TimeFmt.string(from: item.modified))")
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
             }
@@ -186,67 +222,41 @@ struct FilesView: View {
         }
         .padding(.horizontal, 11)
         .padding(.vertical, 9)
-        .background(RMTheme.panel)
+        .background(picked ? RMTheme.surface : RMTheme.panel)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .contentShape(Rectangle())
         .onTapGesture {
-            if item.isDir { fs.enter(item.name) } else { detail = item }
+            if item.isDir {
+                fs.enter(item.name)
+                selected.removeAll()
+            } else if multiMode {
+                // 多选：点文件只勾选，不弹详情页
+                if picked { selected.remove(item.name) } else { selected.insert(item.name) }
+            } else {
+                detail = item
+            }
         }
         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
             Button("复制") { fs.putClipboard(cut: false, name: item.name) }
                 .tint(RMTheme.accent)
             Button("剪切") { fs.putClipboard(cut: true, name: item.name) }
                 .tint(RMTheme.warn)
-            Button("删除", role: .destructive) { fs.remove(name: item.name) }
+            Button("删除", role: .destructive) {
+                fs.remove(name: item.name)
+                selected.remove(item.name)
+            }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
+            // 目录也能改：先改名成 "名字 2"，再走详情页重命名
+            Button("复制一份") { fs.copy(name: item.name, toDir: fs.path) }
+                .tint(RMTheme.accent)
             Button("重命名") {
-                fs.rename(from: item.name, to: item.name + "2")
+                fs.rename(from: item.name, to: item.name + " 2")
             }
-            .tint(RMTheme.accent)
+            .tint(RMTheme.warn)
         }
     }
 
-    private var moveSheet: some View {
-        NavigationStack {
-            List {
-                Section("当前目录（写到这就等于不动）") {
-                    Button {
-                        applyMoveTo("/")
-                        showMove = false
-                    } label: {
-                        Label("这里 · \(fs.displayPath)", systemImage: "folder.fill")
-                            .font(.system(size: 13))
-                    }
-                }
-                Section("所有工作空间") {
-                    ForEach(fs.dirTreePaths, id: \.self) { dir in
-                        Button { applyMoveTo(dir); showMove = false } label: {
-                            Label("/rmind\(dir == "/" ? "" : dir)", systemImage: "folder")
-                                .font(.system(size: 13))
-                        }
-                    }
-                }
-            }
-            .listStyle(.plain)
-            .background(RMTheme.rail)
-            .navigationTitle(moveMode == 0 ? "移动到…" : "复制到的…")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { showMove = false } } }
-        }
-    }
-
-    private func applyMoveTo(_ dir: String) {
-        guard let it = moveItem else { return }
-        if dir == "/" && fs.path == "/" {
-            fs.message = "已经在同一个目录，不用动"
-            return
-        }
-        if moveMode == 0 { fs.move(name: it.name, toDir: dir) }
-        else { fs.copy(name: it.name, toDir: dir) }
-        moveItem = nil
-    }
-
-    private var workspaceDirs: [String] { fs.dirTreePaths }
 }
 
 // MARK: - 文件详情（文本 / Hex / 属性 / 操作）
@@ -268,20 +278,80 @@ struct FileDetailView: View {
     @State private var rename = ""
     @State private var tab = 0
 
+    /// 文件夹没有"文本/Hex"，只有一个目录操作页
+    private var isDir: Bool { item.isDir }
+
     var body: some View {
         NavigationStack {
             Form {
-                Section("操作") {
-                    Picker("", selection: $tab) {
-                        Text("文本").tag(0)
-                        Text("Hex").tag(1)
-                        Text("属性").tag(2)
-                    }
-                    .pickerStyle(.segmented)
-                    .listRowBackground(RMTheme.panel)
+                if isDir { dirSections } else { fileSections }
+            }
+            .background(RMTheme.bg)
+            .navigationTitle(item.name)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .onAppear {
+                rename = item.name
+                if !isDir {
+                    if let t = fs.readText(name: item.name) { text = t; canEdit = true }
+                    loadMoreHex(from: 0)
                 }
+            }
+        }
+    }
 
-                if tab == 0 {
+    // MARK: - 文件夹改动（重命名 / 在里面新建 / 压缩 / 删除 / 属性）
+
+    @ViewBuilder
+    private var dirSections: some View {
+        Section("目录操作") {
+            HStack {
+                Text("重命名成")
+                Spacer()
+                TextField("", text: $rename)
+                    .multilineTextAlignment(.trailing)
+                    .frame(width: 150)
+            }
+            Button("重命名这个文件夹") {
+                fs.rename(from: item.name, to: rename.isEmpty ? item.name : rename)
+            }
+        }
+        Section("在里面建") {
+            Button("新建一个文件") { fs.writeFileIn(dir: item.name, name: "新文件.txt") }
+            Button("新建一个文件夹") { fs.makeDirIn(dir: item.name, name: "新文件夹") }
+        }
+        Section("打包 / 删除") {
+            Button("压缩成 zip") { fs.zip(name: item.name) }
+            Button("解压缩") { fs.unzip(name: item.name) }
+            Button("剪切这个文件夹") { fs.putClipboard(cut: true, name: item.name) }
+            Button("复制这个文件夹") { fs.putClipboard(cut: false, name: item.name) }
+            Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
+        }
+        Section("属性") {
+            ForEach(Array(fs.attributes(name: item.name).enumerated()), id: \.offset) { _, pair in
+                HStack {
+                    Text(pair.0).font(.system(size: 12)).foregroundStyle(RMTheme.textSub)
+                    Spacer()
+                    Text(pair.1).font(.system(size: 12)).foregroundStyle(RMTheme.text)
+                }
+            }
+        }
+    }
+
+    // MARK: - 文件（文本 / Hex / 属性 / 管理）
+
+    @ViewBuilder
+    private var fileSections: some View {
+        Section("操作") {
+            Picker("", selection: $tab) {
+                Text("文本").tag(0)
+                Text("Hex").tag(1)
+                Text("属性").tag(2)
+            }
+            .pickerStyle(.segmented)
+            .listRowBackground(RMTheme.panel)
+        }
+
+        if tab == 0 {
                     Section {
                         if canEdit {
                             TextEditor(text: $text)
@@ -391,14 +461,6 @@ struct FileDetailView: View {
                     Button("粘贴到当前目录") { fs.paste() }
                     Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
                 }
-            }
-            .background(RMTheme.bg)
-            .navigationTitle(item.name)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
-            .onAppear {
-                rename = item.name
-                if let t = fs.readText(name: item.name) { text = t; canEdit = true }
-                loadMoreHex(from: 0)
             }
         }
     }
