@@ -3,6 +3,12 @@ import JavaScriptCore
 
 // MARK: - 文件浏览器
 
+private let TimeFmt: DateFormatter = {
+    let f = DateFormatter()
+    f.dateFormat = "HH:mm"
+    return f
+}()
+
 struct FilesView: View {
     @EnvironmentObject private var fs: FileStore
 
@@ -81,10 +87,8 @@ struct FilesView: View {
             Button { moveMode = 1; moveItem = nil; showMove = true } label: {
                 Text("复制").font(.system(size: 12)).foregroundStyle(RMTheme.text)
             }
-            Button {
+            Button(action: { fs.paste() }) {
                 Text("粘贴").font(.system(size: 12)).foregroundStyle(fs.hasClipboard ? RMTheme.text : RMTheme.textSub)
-            } action: {
-                fs.paste()
             }
             .disabled(!fs.hasClipboard)
             Spacer()
@@ -126,7 +130,7 @@ struct FilesView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(RMTheme.text)
                     .lineLimit(1)
-                Text(item.isDir ? "文件夹" : "\(item.size) 字节 · \(item.modified, format: .dateTime.hour():.minute())")
+                Text(item.isDir ? "文件夹" : "\(item.size) 字节 · \(TimeFmt.string(from: item.modified))")
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
             }
@@ -419,7 +423,7 @@ struct TerminalView: View {
     private func runJS(_ source: String) {
         guard let ctx = JSContext() else { lines.append("JSContext 不可用"); return }
         var out: [String] = []
-        ctx.setObject({ (s: Any) -> Void in out.append(String(describing: s)) }, forKey: "emit")
+        ctx.setObject({ (s: Any) -> Void in out.append(String(describing: s)) }, forKeyedSubscript: "emit")
         ctx.evaluateScript("""
         var console = { log: function(){ emit(Array.prototype.slice.call(arguments).join(' ')); } };
         function print(s){ emit(String(s)); }
@@ -427,9 +431,9 @@ struct TerminalView: View {
         function read(p){ return __readFn(p); }
         function write(p, s){ return __writeFn(p, String(s)); }
         """)
-        ctx.setObject({ (p: String) -> [String] in self.fs.entries.map { $0.name } }, forKey: "__list")
-        ctx.setObject({ (p: String) -> String in self.fs.readText(name: p) ?? "" }, forKey: "__readFn")
-        ctx.setObject({ (p: String, s: String) -> Bool in self.fs.writeText(name: p, text: s); return true }, forKey: "__writeFn")
+        ctx.setObject({ (p: String) -> [String] in self.fs.entries.map { $0.name } }, forKeyedSubscript: "__list")
+        ctx.setObject({ (p: String) -> String in self.fs.readText(name: p) ?? "" }, forKeyedSubscript: "__readFn")
+        ctx.setObject({ (p: String, s: String) -> Bool in self.fs.writeText(name: p, text: s); return true }, forKeyedSubscript: "__writeFn")
         ctx.exceptionHandler = { _, ex in
             if let e = ex?.toString() { out.append("js error: " + e) }
         }
