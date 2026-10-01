@@ -38,7 +38,8 @@ final class RMTrace: ObservableObject {
                 if next.count > self.cap { next.removeFirst(next.count - self.cap) }
                 self.entries = next
             }
-            self.appendFile("[\(ISO())] [\(tag)] \(text)\n")
+            let stamp = self.ISO()
+            self.appendFile("[\(stamp)] [\(tag)] \(text)\n")
         }
     }
 
@@ -76,7 +77,7 @@ final class RMTrace: ObservableObject {
     /// 这样「生图点一下就崩」我能直接看到崩在哪个调用栈附近。
     func installHandlers() {
         serial.async {
-            NSSetUncaughtExceptionHandler { ex, _ in
+            NSSetUncaughtExceptionHandler { ex in
                 RMTrace.shared.log("CRASH exception: \(ex)", tag: "crash")
                 let r = ex.reason ?? ""
                 if !r.isEmpty { RMTrace.shared.log("CRASH reason: \(r)", tag: "crash") }
