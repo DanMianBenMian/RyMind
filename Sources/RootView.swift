@@ -53,7 +53,7 @@ struct RootView: View {
     @ViewBuilder
     private var content: some View {
         switch tab {
-        case .chat:    ChatView()
+        case .chat:    ChatView(landscape: landscape)
         case .image:   ImageGenView()
         case .perf:    PerfView()
         case .library: LibraryView()
