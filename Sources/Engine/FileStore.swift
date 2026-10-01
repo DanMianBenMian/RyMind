@@ -93,7 +93,9 @@ final class FileStore: ObservableObject {
     /// Workspaces 下所有子目录的 unix 路径（移动/复制的目标列表）
     var dirTreePaths: [String] {
         var out: [String] = []
-        guard let e = enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+        guard let e = FileManager.default.enumerator(at: rootURL,
+                                                     includingPropertiesForKeys: [.isDirectoryKey],
+                                                     options: [.skipsHiddenFiles]) else { return [] }
         for case let url as URL in e where (try? url.resourceValues(forKey: .isDirectoryKey))?.isDirectory == true {
             let rel = url.path.replacingOccurrences(of: rootURL.path, with: "")
             out.append(rel.isEmpty ? "/" : rel)
