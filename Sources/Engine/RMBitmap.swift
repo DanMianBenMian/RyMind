@@ -141,7 +141,7 @@ struct RMBitmap {
 
     // MARK: - 噪声
 
-    private static func next(_ s: inout UInt64) -> UInt64 {
+    fileprivate static func next(_ s: inout UInt64) -> UInt64 {
         s = s &* 6364136223846793005 &+ 1442695040888963407
         return s >> 33
     }
@@ -169,7 +169,7 @@ struct RMBitmap {
     }
 
     /// 分形噪声（fBm）
-    private static func fbm(x: Double, y: Double, seed: UInt64, octaves: Int) -> Double {
+    fileprivate static func fbm(x: Double, y: Double, seed: UInt64, octaves: Int) -> Double {
         var amp = 0.5
         var freq = 1.0
         var sum = 0.0
@@ -183,11 +183,11 @@ struct RMBitmap {
         return sum / max(norm, 0.0001)
     }
 
-    private static func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
+    fileprivate static func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
 
     // MARK: - 绘制
 
-    private static func drawBuffer(_ buf: [UInt8], size: Int) -> UIImage? {
+    fileprivate static func drawBuffer(_ buf: [UInt8], size: Int) -> UIImage? {
         guard let cg = cgFromBuffer(buf, size: size) else { return nil }
         let cs = CGColorSpaceCreateDeviceRGB()
         guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
@@ -209,8 +209,7 @@ struct RMBitmap {
                        intent: .defaultIntent)
     }
 
-    /// 小图放大（高质量插值，iPad 上非常快）
-    private static func upscale(_ img: UIImage, to size: Int) -> UIImage? {
+    fileprivate static func upscale(_ img: UIImage, to size: Int) -> UIImage? {
         let fmt = UIGraphicsImageRendererFormat()
         fmt.scale = 1
         fmt.opaque = true
@@ -225,8 +224,8 @@ struct RMBitmap {
     /// 把参考图缩到 small×small，取每点的亮度和颜色。
     /// ⚠️ 别用 `out.dataProvider.data as Data?`——Swift 桥接经常拿到 nil，参考图就白选了。
     /// 这里直接往一块自己申请的 buffer 上画，画完自己读字节，稳。
-    private static func drawReference(_ cg: CGImage, into lum: inout [Float],
-                                      _ rgb: inout [RGB], size: Int) -> Bool {
+    fileprivate static func drawReference(_ cg: CGImage, into lum: inout [Float],
+                                          _ rgb: inout [RGB], size: Int) -> Bool {
         let n = size * size
         var buf = [UInt8](repeating: 0, count: n * 4)
         let ok = buf.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
@@ -249,4 +248,143 @@ struct RMBitmap {
         }
         return true
     }
+}
+
+// MARK: - 可分片的出图任务
+
+/// ⚠️ 出图不能"一次算完整张"：180×180 全算完交给 UI，界面像卡死甚至崩。
+/// 这里拆成小块（每次几行）算，算几行回报一次进度、让一次出，随时能取消。
+final class RMPixelJob {
+    struct Opt {
+        var size: Int
+        var seed: UInt64
+        var style: RMBitmap.Style
+        var paletteName: String
+        var reference: UIImage?
+    }
+
+    private let small = 180
+    private var buf: [UInt8]
+    private var refLum: [Float]
+    private var refRGB: [RMBitmap.RGB]
+    private var hasRef = false
+    private let pal: [RMBitmap.RGB]
+    private let opt: Opt
+    private var row = 0
+
+    init(opt: Opt) {
+        self.opt = opt
+        self.buf = [UInt8](repeating: 0, count: small * small * 4)
+        self.refLum = [Float](repeating: -1, count: small * small)
+        self.refRGB = [RMBitmap.RGB](repeating: (0, 0, 0), count: small * small)
+        self.pal = RMBitmap.palettes[opt.paletteName] ?? RMBitmap.palettes["青蓝"]!
+        if let img = opt.reference {
+            var src = img.cgImage
+            if src == nil, let re = UIImage(data: img.pngData() ?? Data()) { src = re.cgImage }
+            if let cg = src, RMBitmap.drawReference(cg, into: &refLum, &refRGB, size: small) {
+                hasRef = true
+            }
+        }
+    }
+
+    /// 0…1
+    var progress: Double { Double(row) / Double(small) }
+
+    /// 算 rows 行；返回 false 表示整张算完
+    @discardableResult
+    func step(rows: Int = 10) -> Bool {
+        let endRow = min(small, row + rows)
+        while row < endRow {
+            autoreleasepool { renderRow(row) }
+            row += 1
+        }
+        return row < small
+    }
+
+    func makeImage() -> UIImage? {
+        autoreleasepool {
+            guard let smallImg = RMBitmap.drawBuffer(buf, size: small) else { return nil }
+            return RMBitmap.upscale(smallImg, to: opt.size)
+        }
+    }
+
+    private func renderRow(_ y: Int) {
+        var s = opt.seed == 0 ? 0x2545F4914F6CDD1D : opt.seed
+        let nX = Double(small)
+        for x in 0..<small {
+            let i = y * small + x
+            let u = Double(x) / nX
+            let v = Double(y) / nX
+
+            s = RMBitmap.next(&s)
+            let ox = Double(Int(s % 64)) * 0.9 - 28.0
+            s = RMBitmap.next(&s)
+            let oy = Double(Int(s % 64)) * 0.9 - 28.0
+
+            var f1 = RMBitmap.fbm(x: Double(x) + ox, y: Double(y) + oy, seed: opt.seed, octaves: 5)
+            var f2 = RMBitmap.fbm(x: Double(x) * 2.0 + ox, y: Double(y) * 2.0 + oy,
+                                  seed: opt.seed ^ 0x9E37, octaves: 4)
+
+            var shape: Double = 0.5
+            switch opt.style {
+            case .nebula:
+                let dx = u - 0.5, dy = v - 0.5
+                shape = 1.0 - min(1.0, sqrt(dx * dx + dy * dy) * 2.2)
+                shape = shape * 0.6 + f1 * 0.4
+            case .ridge:
+                let h = 0.35 + 0.30 * Double(f1)
+                shape = v > h ? 0.25 : 1.0
+                shape = shape * 0.75 + f2 * 0.25
+            case .wave:
+                shape = 0.5 + 0.5 * sin((u * 7.0 + f1 * 2.2) * Double.pi)
+                shape = shape * 0.8 + v * 0.2
+            case .grid:
+                let gx = abs((u * 9.0) - ((u * 9.0).rounded()))
+                let gy = abs((v * 9.0) - ((v * 9.0).rounded()))
+                let line = max(0.0, 1.0 - (min(gx, gy) * 26.0))
+                shape = 0.35 + line * 0.5 + f1 * 0.25
+            }
+
+            f1 = min(1.0, max(0.0, f1))
+            f2 = min(1.0, max(0.0, f2))
+            let t = min(1.0, max(0.0, shape * 0.75 + f2 * 0.35))
+
+            var col: RMBitmap.RGB
+            if hasRef {
+                let base = refRGB[i]
+                let lum0: Float = refLum[i] >= 0 ? refLum[i] : Float(t)
+                let detail: Double = 0.55 + f1 * 0.5 - 0.25
+                let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
+                col = (base.r * bright, base.g * bright, base.b * bright)
+                let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                let p = pal[pIdx]
+                let mix: Float = 0.30
+                col = (col.r * (1 - mix) + p.r * mix,
+                       col.g * (1 - mix) + p.g * mix,
+                       col.b * (1 - mix) + p.b * mix)
+            } else {
+                let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                let p0 = pal[pIdx]
+                let p1 = pal[min(pal.count - 1, pIdx + 1)]
+                let frac = Double(t * Double(pal.count - 1)) - Double(pIdx)
+                col = (Float(RMBitmap.lerp(Double(p0.r), Double(p1.r), frac)),
+                       Float(RMBitmap.lerp(Double(p0.g), Double(p1.g), frac)),
+                       Float(RMBitmap.lerp(Double(p0.b), Double(p1.b), frac)))
+            }
+
+            let o = i * 4
+            buf[o]     = UInt8(max(0, min(255, Int(col.r * 255))))
+            buf[o + 1] = UInt8(max(0, min(255, Int(col.g * 255))))
+            buf[o + 2] = UInt8(max(0, min(255, Int(col.b * 255))))
+            buf[o + 3] = 255
+        }
+    }
+}
+
+/// 出图取消开关（生成中点「生成中…点停止」用）
+final class RMCancelToken {
+    private let lock = NSLock()
+    private var flag = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return flag }
+    func cancel() { lock.lock(); flag = true; lock.unlock() }
 }
