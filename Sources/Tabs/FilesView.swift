@@ -46,26 +46,58 @@ struct FilesView: View {
         .toast(fs.message)
     }
 
+    // 面包屑：每一节都能点，点哪回哪，点 /rmind 就是回根目录
     private var pathBar: some View {
-        HStack(spacing: 8) {
-            Button { fs.up() } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 13))
-                    .foregroundStyle(RMTheme.accent)
+        VStack(alignment: .leading, spacing: 4) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 2) {
+                    ForEach(Array(pathSegments.enumerated()), id: \.offset) { i, seg in
+                        Button {
+                            if seg.1 == "/" { fs.goRoot() } else { fs.enterPath(seg.1) }
+                        } label: {
+                            Text(seg.0)
+                                .font(.system(size: 11, weight: i == pathSegments.count - 1 ? .medium : .regular))
+                                .foregroundStyle(i == pathSegments.count - 1 ? RMTheme.accent : RMTheme.textSub)
+                        }
+                        .buttonStyle(.plain)
+                        if i < pathSegments.count - 1 {
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 9))
+                                .foregroundStyle(RMTheme.textSub)
+                        }
+                    }
+                }
             }
-            .disabled(fs.path == "/")
-            Text(fs.displayPath)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(RMTheme.accent)
-                .lineLimit(1)
-            Spacer()
-            Text("\(fs.entries.count) 项")
-                .font(.system(size: 11))
-                .foregroundStyle(RMTheme.textSub)
+            HStack(spacing: 8) {
+                Button {
+                    if fs.path == "/" { fs.goRoot() } else { fs.up() }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: fs.path == "/" ? "house.fill" : "chevron.left")
+                            .font(.system(size: 12))
+                        Text(fs.path == "/" ? "根目录" : "上一级")
+                            .font(.system(size: 11))
+                    }
+                    .foregroundStyle(RMTheme.accent)
+                }
+                Spacer()
+                Text("\(fs.entries.count) 项")
+                    .font(.system(size: 11))
+                    .foregroundStyle(RMTheme.textSub)
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(RMTheme.rail)
+    }
+
+    private var pathSegments: [(String, String)] {
+        let parts = fs.path.split(separator: "/").map(String.init)
+        guard !parts.isEmpty else { return [("/rmind", "/")] }
+        var out: [(String, String)] = [("/rmind", "/")]
+        var acc = ""
+        for p in parts { acc += "/" + p; out.append((p, acc)) }
+        return out
     }
 
     private var toolbar: some View {
@@ -149,7 +181,7 @@ struct FilesView: View {
                 .tint(RMTheme.accent)
             Button("剪切") { fs.putClipboard(cut: true, name: item.name) }
                 .tint(RMTheme.warn)
-            Button("删除", role: .destructive) { fs.remove(name: item.name) }
+            Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: false) {
             Button("重命名") {
@@ -162,39 +194,61 @@ struct FilesView: View {
     private var moveSheet: some View {
         NavigationStack {
             List {
-                ForEach(Array(Set([""] + workspaceDirs)).sorted(), id: \.self) { dir in
+                Section("当前目录（写到这就等于不动）") {
                     Button {
-                        if let it = moveItem {
-                            if moveMode == 0 { fs.move(name: it.name, toDir: dir) }
-                            else { fs.copy(name: it.name, toDir: dir) }
-                        }
+                        applyMoveTo("/")
                         showMove = false
                     } label: {
-                        Text("/rmind" + (dir == "/" ? "" : dir)).font(.system(size: 13))
+                        Label("这里 · \(fs.displayPath)", systemImage: "folder.fill")
+                            .font(.system(size: 13))
+                    }
+                }
+                Section("所有工作空间") {
+                    ForEach(fs.dirTreePaths, id: \.self) { dir in
+                        Button { applyMoveTo(dir); showMove = false } label: {
+                            Label("/rmind\(dir == "/" ? "" : dir)", systemImage: "folder")
+                                .font(.system(size: 13))
+                        }
                     }
                 }
             }
             .listStyle(.plain)
+            .background(RMTheme.rail)
             .navigationTitle(moveMode == 0 ? "移动到…" : "复制到的…")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { showMove = false } } }
         }
     }
 
-    private var workspaceDirs: [String] {
-        (try? FileManager.default.contentsOfDirectory(atPath: fs.rootURL.path)) ?? []
+    private func applyMoveTo(_ dir: String) {
+        guard let it = moveItem else { return }
+        if dir == "/" && fs.path == "/" {
+            fs.message = "已经在同一个目录，不用动"
+            return
+        }
+        if moveMode == 0 { fs.move(name: it.name, toDir: dir) }
+        else { fs.copy(name: it.name, toDir: dir) }
+        moveItem = nil
     }
+
+    private var workspaceDirs: [String] { fs.dirTreePaths }
 }
 
 // MARK: - 文件详情（文本 / Hex / 属性 / 操作）
 
 struct FileDetailView: View {
     @EnvironmentObject private var fs: FileStore
+    @Environment(\.dismiss) private var dismiss
     let item: RMFileEntry
 
     @State private var text: String = ""
     @State private var canEdit = false
-    @State private var hexDump: String = ""
+    @State private var hexText: String = ""
+    @State private var hexTotal = 0
+    @State private var hexFrom = 0
+    @State private var hexLoaded = 0
+    @State private var hexLoading = false
     @State private var hexWrite = ""
+    @State private var hexOffset = "0"
     @State private var rename = ""
     @State private var tab = 0
 
@@ -233,26 +287,61 @@ struct FileDetailView: View {
                     }
                 } else if tab == 1 {
                     Section {
-                        Text(hexDump)
+                        HStack(spacing: 8) {
+                            Text("共 \(hexTotal) 字节 · 已载入 \(hexLoaded)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(RMTheme.textSub)
+                            Spacer()
+                            Button(hexLoading ? "加载中…" : "再往下 4 KB") {
+                                loadMoreHex()
+                            }
+                            .font(.system(size: 11))
+                            .foregroundStyle(RMTheme.accent)
+                            .disabled(hexLoading || hexFrom >= hexTotal)
+                        }
+                        // 文本框动态加载，一次不把整个文件塞进内存/视图
+                        TextEditor(text: .constant(hexText))
                             .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(RMTheme.text)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(minHeight: 200, maxHeight: 360)
+                            .autocorrectionDisabled()
+                            .autocapitalization(.none)
+                            .disabled(true)
                             .listRowBackground(RMTheme.bg)
                     }
-                    Section("写字节（16 进制，空格分隔，如 48 65 6C 6C 6F）") {
-                        TextField("字节", text: $hexWrite)
+                    Section("从偏移写字节（只改这一段，其它字节不动）") {
+                        HStack {
+                            Text("偏移")
+                            TextField("0", text: $hexOffset)
+                                .font(.system(size: 12, design: .monospaced))
+                                .autocapitalization(.none)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 110)
+                        }
+                        TextField("字节（16 进制，空格分隔，如 48 65 6C 6C 6F）", text: $hexWrite)
                             .font(.system(size: 12, design: .monospaced))
                             .autocapitalization(.none)
                         Button("写入") {
                             var bytes = [UInt8]()
                             for tok in hexWrite.split(separator: " ") {
-                                if let b = UInt8(tok, radix: 16) { bytes.append(b) }
+                                if let b = UInt8(tok.trimmingCharacters(in: .punctuationCharacters), radix: 16) { bytes.append(b) }
                             }
-                            guard !bytes.isEmpty, let data = try? Data(bytes) else { return }
-                            fs.writeData(name: item.name, data: data)
-                            loadHex()
+                            guard !bytes.isEmpty, let off = Int(hexOffset.trimmingCharacters(in: .whitespaces)) else {
+                                fs.message = "偏移或字节没填对"
+                                return
+                            }
+                            _ = fs.writeBytes(name: item.name, offset: off, bytes: bytes)
+                            fs.message = fs.message
+                            loadMoreHex(from: 0)
                         }
                         .foregroundStyle(RMTheme.accent)
+                    }
+                    Section("整段替换（文本框里粘一整段 hex）") {
+                        Button("用当前这段 hex 覆盖整个文件") {
+                            _ = fs.writeHexText(name: item.name, hexText: hexText)
+                            loadMoreHex(from: 0)
+                        }
+                        .foregroundStyle(RMTheme.warn)
                     }
                 } else {
                     Section("属性") {
@@ -284,39 +373,35 @@ struct FileDetailView: View {
                     Button("剪切") { fs.putClipboard(cut: true, name: item.name) }
                     Button("复制") { fs.putClipboard(cut: false, name: item.name) }
                     Button("粘贴到当前目录") { fs.paste() }
-                    Button("删除", role: .destructive) { fs.remove(name: item.name) }
+                    Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
                 }
             }
             .background(RMTheme.bg)
             .navigationTitle(item.name)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") {} } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
             .onAppear {
                 rename = item.name
                 if let t = fs.readText(name: item.name) { text = t; canEdit = true }
-                loadHex()
+                loadMoreHex(from: 0)
             }
         }
     }
 
-    private func loadHex() {
-        guard let d = fs.readData(name: item.name), !d.isEmpty else { hexDump = "（空文件）"; return }
-        let n = min(d.count, 1024)
-        var s = ""
-        var i = 0
-        while i < n {
-            let end = min(i + 16, n)
-            var hexPart = ""
-            var asciiPart = ""
-            for j in i..<end {
-                hexPart += String(format: "%02X ", d[j])
-                let c = d[j]
-                asciiPart += (c >= 32 && c < 127) ? String(UnicodeScalar(c)) : "."
+    /// 分页载入 hex（一次 4 KB，点"再往下"接着来），避免一次性把大文件全灌进视图
+    private func loadMoreHex(from: Int? = nil) {
+        if let from { hexFrom = from }
+        guard !hexLoading else { return }
+        hexLoading = true
+        DispatchQueue.global(qos: .userInitiated).async {
+            let r = fs.hexText(name: item.name, from: hexFrom, count: 4096)
+            DispatchQueue.main.async {
+                self.hexText = r.text
+                self.hexTotal = r.total
+                self.hexLoaded = hexFrom + r.loaded
+                self.hexLoading = false
+                if r.loaded == 0 { self.hexFrom = self.hexTotal } else { self.hexFrom += r.loaded }
             }
-            s += String(format: "%08X  %-47s  %s\n", i, hexPart, asciiPart)
-            i = end
         }
-        if d.count > n { s += "… 还有 \(d.count - n) 字节未显示" }
-        hexDump = s
     }
 }
 
@@ -324,6 +409,7 @@ struct FileDetailView: View {
 
 struct TerminalView: View {
     @EnvironmentObject private var fs: FileStore
+    @Environment(\.dismiss) private var dismiss
     @State private var lines: [String] = ["RyMind 终端 · 工作空间是 /rmind", "输入 help 看命令，js <文件> 跑 JS"]
     @State private var cmd = ""
 
@@ -357,7 +443,7 @@ struct TerminalView: View {
                 .background(RMTheme.rail)
             }
             .navigationTitle("终端 · \(fs.displayPath)")
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") {} } }
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
         }
     }
 
