@@ -15,7 +15,9 @@ struct ImageGenView: View {
     @State private var sizeIdx = 1
     @State private var photoItem: PhotosPickerItem?
     @State private var reference: UIImage?
-    @State private var results: [UIImage] = []
+    /// ⚠️ 结果存成带稳定 id 的元组：老写法用 Array offset 当 id，
+    /// 插入/淘汰后所有 id 平移，SwiftUI 的 diff 会失控（这是弹层和列表一起崩的帮凶）。
+    @State private var results: [RMPic] = []
     @State private var previewItem: LoadedImage?
     @State private var note = ""
     /// 当前这张的取消开关（点「生成中…点停止」就掐掉）
@@ -163,8 +165,8 @@ struct ImageGenView: View {
                         SectionCard(title: "出图结果（\(results.count) 张，点开看大图）") {
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
-                                    ForEach(Array(results.enumerated()), id: \.offset) { _, img in
-                                        Button { previewItem = LoadedImage(img: img) } label: {
+                                    ForEach(results) { pic in
+                                        Button { previewItem = LoadedImage(img: pic.img) } label: {
                                             Image(uiImage: img)
                                                 .resizable()
                                                 .scaledToFill()
@@ -252,15 +254,17 @@ struct ImageGenView: View {
             }
             let out = finished
             let cancelled = token.isCancelled
+            // ⚠️ pngData() 很贵，放到后台编；主线程只负责把图塞进列表，别再拖时间
+            let png = out?.pngData()
             DispatchQueue.main.async {
                 self.running = false
                 self.progress = 0
                 self.stage = ""
                 if let out, !cancelled {
-                    self.results.insert(out, at: 0)
+                    self.results.insert(RMPic(img: out), at: 0)
                     // 结果别无限堆（内存大头），留最近 6 张
                     if self.results.count > 6 { self.results.removeLast() }
-                    if let d = out.pngData() {
+                    if let d = png {
                         FileStore.shared.writeData(name: "studio/rmind-\(sd % 100000)-v\(seq).png", data: d)
                     }
                 } else if cancelled {
@@ -275,6 +279,12 @@ struct ImageGenView: View {
 }
 
 // MARK: - 预览弹层
+
+/// 一张出图结果（带自己的 id，别用数组下标）
+struct RMPic: Identifiable {
+    let img: UIImage
+    let id = UUID()
+}
 
 struct LoadedImage: Identifiable {
     let img: UIImage
