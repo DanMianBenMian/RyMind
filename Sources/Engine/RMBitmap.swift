@@ -150,31 +150,12 @@ struct RMBitmap {
     /// 而 `UInt64(-3)` 在 Swift 里是**非法转换会直接 trap**（EXC_BREAKPOINT / SIGTRAP）。
     /// 这里必须用 `bitPattern:` 按位重解释，拿补码当无符号用 —— 乘法/掩码语义完全一样，且永不 trap。
     private static func hash(_ x: Int, _ y: Int, _ seed: UInt64) -> Double {
-        var h = UInt64(bitPattern: x) &* 374761393
-        h &+= UInt64(bitPattern: y) &* 668265263
+        var h = UInt64(bitPattern: Int64(x)) &* 374761393
+        h &+= UInt64(bitPattern: Int64(y)) &* 668265263
         h &+= seed
         h = (h ^ (h >> 13)) &* 1274126177
         h = h ^ (h >> 16)
         return Double(h & 0xFFFF) / 65535.0
-    }
-
-    /// Double → Int 的安全转换：NaN / Inf / 超范围都不 trap，直接钉到边界。
-    /// （`Int(someDouble)` 在 NaN、Inf、或超出 Int 范围时同样是 Swift trap，出图循环里绝不能出现）
-    private static func asInt(_ d: Double) -> Int {
-        if d.isNaN { return 0 }
-        if d.isInfinite { return d > 0 ? Int.max : Int.min }
-        if d >= Double(Int.max) { return Int.max }
-        if d <= Double(Int.min) { return Int.min }
-        return Int(d)
-    }
-
-    /// Double → 0…255 字节：NaN / Inf 兜底，永不 trap。
-    private static func byte(_ d: Double) -> UInt8 {
-        if d.isNaN { return 0 }
-        if d.isInfinite { return d > 0 ? 255 : 0 }
-        if d <= 0 { return 0 }
-        if d >= 255 { return 255 }
-        return UInt8(d)
     }
 
     private static func smooth(_ t: Double) -> Double {
@@ -182,7 +163,7 @@ struct RMBitmap {
     }
 
     private static func valueNoise(x: Double, y: Double, seed: UInt64) -> Double {
-        let xi = asInt(x), yi = asInt(y)
+        let xi = rmAsInt(x), yi = rmAsInt(y)
         let xf = x - Double(xi), yf = y - Double(yi)
         let u = smooth(xf), v = smooth(yf)
         let a = hash(xi, yi, seed)
@@ -199,7 +180,7 @@ struct RMBitmap {
         var sum = 0.0
         var norm = 0.0
         for i in 0..<octaves {
-            sum += valueNoise(x: x * freq, y: y * freq, seed: seed &+ UInt64(bitPattern: i * 7919)) * amp
+            sum += valueNoise(x: x * freq, y: y * freq, seed: seed &+ UInt64(bitPattern: Int64(i * 7919))) * amp
             norm += amp
             amp *= 0.5
             freq *= 2.05
@@ -230,7 +211,32 @@ struct RMBitmap {
         return ctx.makeImage()
     }
 
-    /// 小图放大到目标尺寸。
+    // MARK: - 永不 trap 的数值转换（出图循环专用）
+
+/// ⚠️ 出图循环里**绝不能**出现裸 `Int(someDouble)` / `UInt64(someInt)`：
+/// Swift 对「整数↔整数转换值域不够」「浮点转整数是 NaN/Inf/超范围」都是**直接 trap**（EXC_BREAKPOINT/SIGTRAP），
+/// 后台线程一 trap 整个 App 就闪退 —— RyMind v0.4.5 的生图崩溃就是 `UInt64(负坐标)` 这一行造成的。
+/// 下面两个函数把所有这些情况钉到边界上，永不 trap。
+
+/// Double → Int：NaN→0，Inf→Int.max/min，超范围→边界
+fileprivate func rmAsInt(_ d: Double) -> Int {
+    if d.isNaN { return 0 }
+    if d.isInfinite { return d > 0 ? Int.max : Int.min }
+    if d >= Double(Int.max) { return Int.max }
+    if d <= Double(Int.min) { return Int.min }
+    return Int(d)
+}
+
+/// Double → 0…255 字节
+fileprivate func rmByte(_ d: Double) -> UInt8 {
+    if d.isNaN { return 0 }
+    if d.isInfinite { return d > 0 ? 255 : 0 }
+    if d <= 0 { return 0 }
+    if d >= 255 { return 255 }
+    return UInt8(d)
+}
+
+/// 小图放大到目标尺寸。
     /// ⚠️⚠️ 绝对不要用 `UIGraphicsImageRenderer`：它不是线程安全的，
     /// 从后台线程（出图任务跑的那条）一调就崩 —— 这就是"点生成直接闪退"的真凶。
     /// 这里换成纯 CoreGraphics：自己申请 buffer 画一次 makeImage()，任何线程都能用。
@@ -382,23 +388,26 @@ final class RMPixelJob {
 
             f1 = min(1.0, max(0.0, f1))
             f2 = min(1.0, max(0.0, f2))
-            let t = min(1.0, max(0.0, shape * 0.75 + f2 * 0.35))
+            let shapePart = shape * 0.75 + f2 * 0.35
+            let t = min(1.0, max(0.0, shapePart))
 
             var col: RMBitmap.RGB
             if hasRef {
                 let base = refRGB[i]
                 let lum0: Float = refLum[i] >= 0 ? refLum[i] : Float(t)
                 let detail: Double = 0.55 + f1 * 0.5 - 0.25
-                let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
+                let rawBright = Double(lum0) * detail + (t - 0.5) * 0.35
+                let bright: Float = Float(min(1.4, max(0.15, rawBright)))
                 col = (base.r * bright, base.g * bright, base.b * bright)
-                let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
+                let pIdx = min(pal.count - 1, rmAsInt(t * Double(pal.count - 1)))
                 let p = pal[pIdx]
                 let mix: Float = 0.30
-                col = (col.r * (1 - mix) + p.r * mix,
-                       col.g * (1 - mix) + p.g * mix,
-                       col.b * (1 - mix) + p.b * mix)
+                let keep = 1 - mix
+                col = (col.r * keep + p.r * mix,
+                       col.g * keep + p.g * mix,
+                       col.b * keep + p.b * mix)
             } else {
-                let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
+                let pIdx = min(pal.count - 1, rmAsInt(t * Double(pal.count - 1)))
                 let p0 = pal[pIdx]
                 let p1 = pal[min(pal.count - 1, pIdx + 1)]
                 let frac = Double(t * Double(pal.count - 1)) - Double(pIdx)
@@ -408,9 +417,9 @@ final class RMPixelJob {
             }
 
             let o = i * 4
-            buf[o]     = byte(col.r * 255)
-            buf[o + 1] = byte(col.g * 255)
-            buf[o + 2] = byte(col.b * 255)
+            buf[o]     = rmByte(Double(col.r) * 255.0)
+            buf[o + 1] = rmByte(Double(col.g) * 255.0)
+            buf[o + 2] = rmByte(Double(col.b) * 255.0)
             buf[o + 3] = 255
         }
     }
