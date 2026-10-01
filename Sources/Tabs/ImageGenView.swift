@@ -259,6 +259,7 @@ struct LoadedImage: Identifiable {
 struct ImagePreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     let img: UIImage
+    @State private var shareItems: [Any] = []
 
     var body: some View {
         NavigationStack {
@@ -270,9 +271,9 @@ struct ImagePreviewSheet: View {
                 }
                 HStack(spacing: 14) {
                     if let png = img.pngData() {
-                        ShareLink(item: png) {
-                            Label("分享", systemImage: "square.and.arrow.up")
-                        }
+                        Button {
+                            shareItems = [png]
+                        } label: { Label("分享", systemImage: "square.and.arrow.up") }
                     }
                     Button {
                         if let d = img.pngData() {
@@ -287,10 +288,25 @@ struct ImagePreviewSheet: View {
             .background(RMTheme.bg)
             .navigationTitle("出图预览")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+            .sheet(isPresented: Binding(get: { !shareItems.isEmpty }, set: { v in if !v { shareItems = [] } })) {
+                ShareSheet(items: shareItems)
+            }
         }
     }
 
     static func item(_ img: UIImage) -> Any { img }
+}
+
+// MARK: - 分享（iOS 16 的 ShareLink 对 Data 不好使，直接用系统分享面板）
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }
 
 // MARK: - 小卡片
