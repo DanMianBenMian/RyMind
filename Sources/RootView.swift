@@ -1,19 +1,21 @@
 import SwiftUI
 
 enum RMTab: String, CaseIterable, Identifiable {
-    case chat    = "对话"
-    case image   = "生图"
-    case perf    = "性能"
-    case library = "库"
+    case chat      = "对话"
+    case image     = "生图"
+    case perf      = "性能"
+    case library   = "库"
+    case advanced  = "高级"
 
     var id: String { rawValue }
 
     var symbol: String {
         switch self {
-        case .chat:    return "bubble.left.and.bubble.right"
-        case .image:   return "photo"
-        case .perf:    return "gauge"
-        case .library: return "folder"
+        case .chat:     return "bubble.left.and.bubble.right"
+        case .image:    return "photo"
+        case .perf:     return "gauge"
+        case .library:  return "folder"
+        case .advanced: return "slider.horizontal.adjustable"
         }
     }
 }
@@ -55,8 +57,9 @@ struct RootView: View {
         switch tab {
         case .chat:    ChatView(landscape: landscape)
         case .image:   ImageGenView()
-        case .perf:    PerfView()
-        case .library: LibraryView()
+        case .perf:     PerfView()
+        case .library:  LibraryView()
+        case .advanced: AdvancedView()
         }
     }
 }
