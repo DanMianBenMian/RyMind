@@ -1,14 +1,19 @@
 import Foundation
+import SwiftUI
 
 /// llama.cpp 引擎（GGUF + Metal）。
 ///
 /// 省内存的手段（对应"一次对话不把整个模型跑进去"）：
-///  1. mmap 惰性分页（llama_model_params 默认 use_mmap = true、use_mlock = false）
-///     → 只把真正跑到的权重页调进物理内存；不锁页，没跑到的部分可被系统回收
-///  2. 独占加载 → 同一时刻只有一个模型在内存里，切模型前先 unload 释放
-///  3. n_gpu_layers 按内存预算决定上 Metal 的层数，预算小就少上
-///  4. 每次生成用全新 context → KV 干净，且不依赖已改名的 llama_kv_cache_clear
-final class LlamaEngine {
+///  1. mmap 惰性分页（llama_model_params 默认 mmap 开、mlock 关）→ 只把跑到的权重页调入物理内存
+///  2. 独占加载 → 同一时刻只有一个模型在内存里，切模型前先 unload
+///  3. n_gpu_layers 按内存预算决定上 Metal 的层数
+///  4. 每次生成用全新 context → KV 干净
+///
+/// 输出质量（修 Qwen 之类小模型"开头标点、复读、跑题"三大毛病）：
+///  · 按品牌拼 **对话模板**（im_start / llama header / gemma turn），而不是把问题裸喂进去
+///  · 认 **品牌对应的终止标记**（<|im_end|> / <|eot_id|> / <end_of_turn|>），一撞上就停
+///  · 贪心 + **重复惩罚**（最近 8 个 token 打 0.45 折、24 个打 0.72 折、更早 0.9 折）
+final class LlamaEngine: ObservableObject {
     static let shared = LlamaEngine()
 
     private var model: OpaquePointer?    // llama_model *
@@ -16,11 +21,16 @@ final class LlamaEngine {
     private var vocab: OpaquePointer?    // const llama_vocab *
     private var loadedId: String?
     private var nCtx: Int32 = 4096
-    private var nGpuLayers: Int32 = 0
     private var backendReady = false
 
-    private(set) var loadedSizeGB: Double = 0
-    private(set) var activeTokens: Int = 0
+    // ---- 实时统计（性能页直接用真实值，不再是示例值）----
+    @Published private(set) var tps: Double = 0
+    @Published private(set) var ctxUsed: Int = 0
+    @Published private(set) var ctxTotal: Int = 0
+    @Published private(set) var metalOn: Bool = false
+    @Published private(set) var metalLayers: Int = 0
+    @Published private(set) var loadedSizeGB: Double = 0
+    @Published private(set) var note: String = "未加载模型"
 
     var loadedModelId: String? { loadedId }
     var isLoaded: Bool { model != nil }
@@ -33,25 +43,62 @@ final class LlamaEngine {
         backendReady = true
     }
 
+    private func key(of s: String) -> String {
+        let l = s.lowercased()
+        if l.contains("llama") { return "llama" }
+        if l.contains("gemma") { return "gemma" }
+        return "qwen"
+    }
+
+    private func template(brand: String, system: String, user: String) -> String {
+        switch brand {
+        case "llama":
+            return "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+        case "gemma":
+            return "<bos><start_of_turn>system\n\(system)\n<end_of_turn>\n<start_of_turn>user\n\(user)<end_of_turn>\n<start_of_turn>assistant\n"
+        default:
+            return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+        }
+    }
+
+    private func stopMarkers(brand: String) -> [String] {
+        switch brand {
+        case "llama": return ["<|eot_id|>", "<|endoftext|>"]
+        case "gemma": return ["<end_of_turn>", "<start_of_turn>"]
+        default:      return ["<|im_end|>", "<|im_start|>", "<|endoftext|>"]
+        }
+    }
+
     @discardableResult
     func load(modelId: String, path: String, ctxTokens: Int, gpuLayers: Int, sizeGB: Double) -> Bool {
-        if loadedId == modelId && isLoaded { return true }
-        unload()   // 独占：换模型前必须释放旧的，避免两个模型同时占内存
+        if loadedId == modelId, isLoaded { return true }
+        unload()
         guard FileManager.default.fileExists(atPath: path) else { return false }
         ensureBackend()
 
         var mp = llama_model_default_params()
         mp.n_gpu_layers = Int32(gpuLayers)
-        // use_mmap / use_mlock 在新版已不在 model_params 里；
-        // 默认行为就是 mmap 载入 + 不锁页——正是我们要的"按需分页、可回收"。
 
         guard let m = llama_model_load_from_file(path, mp) else { return false }
         model = m
         vocab = llama_model_get_vocab(m)
         nCtx = Int32(ctxTokens)
-        nGpuLayers = Int32(gpuLayers)
         loadedId = modelId
-        loadedSizeGB = sizeGB
+
+        let brand = key(of: modelId)
+        DispatchQueue.main.async {
+            self.loadedModelId = modelId
+            self.loadedSizeGB = sizeGB
+            self.ctxTotal = ctxTokens
+            self.metalOn = gpuLayers > 0
+            self.metalLayers = gpuLayers
+            self.ctxUsed = 0
+            self.tps = 0
+            self.note = gpuLayers > 0
+                ? "\(modelId) 已加载 · Metal \(gpuLayers) 层"
+                : "\(modelId) 已加载 · 纯 CPU"
+        }
+        _ = brand
         return true
     }
 
@@ -59,9 +106,21 @@ final class LlamaEngine {
         if let c = ctx   { llama_free(c);       ctx = nil }
         if let m = model { llama_model_free(m); model = nil }
         vocab = nil
+        let had = loadedId
         loadedId = nil
-        loadedSizeGB = 0
-        activeTokens = 0
+        if let h = had {
+            DispatchQueue.main.async {
+                if self.loadedModelId == h {
+                    self.loadedModelId = nil
+                    self.loadedSizeGB = 0
+                    self.ctxUsed = 0
+                    self.metalOn = false
+                    self.metalLayers = 0
+                    self.tps = 0
+                    self.note = "已卸载 \(h)"
+                }
+            }
+        }
     }
 
     private func freshContext() -> OpaquePointer? {
@@ -73,20 +132,27 @@ final class LlamaEngine {
         return llama_init_from_model(m, cp)
     }
 
-    /// greedy 生成（避开 sampler API，直接对 logits 取 argmax，少一个版本依赖）
+    /// 生成。会按品牌拼好对话模板、认终止标记、加重复惩罚。
     @discardableResult
-    func generate(prompt: String, maxTokens: Int = 256, onToken: ((String) -> Void)? = nil) -> String {
+    func generate(brandHint: String, system: String, prompt: String,
+                  maxTokens: Int = 256, onToken: ((String) -> Void)? = nil) -> String {
         guard let v = vocab, model != nil else { return "" }
 
         if let old = ctx { llama_free(old); ctx = nil }
         guard let c = freshContext() else { return "" }
         ctx = c
 
+        let brand = key(of: brandHint)
+        let text = template(brand: brand, system: system, user: prompt)
         let cap = max(Int(nCtx), 1)
         var pTokens = [llama_token](repeating: 0, count: cap)
-        let nPrompt = Int(llama_tokenize(v, prompt, Int32(prompt.utf8.count), &pTokens, Int32(cap), true, false))
-        guard nPrompt > 0 else { return "" }
-        activeTokens = nPrompt
+
+        var nPrompt = 0
+        text.withCString { p in
+            nPrompt = Int(llama_tokenize(v, p, Int32(text.utf8.count), &pTokens, Int32(cap), false, true))
+        }
+        guard nPrompt > 0, nPrompt < cap else { return "" }
+        DispatchQueue.main.async { self.ctxUsed = nPrompt }
 
         var batch = llama_batch_init(Int32(nPrompt), 0, 1)
         batch.n_tokens = Int32(nPrompt)
@@ -101,29 +167,48 @@ final class LlamaEngine {
         llama_batch_free(batch)
         guard ok else { return "" }
 
+        let markers = stopMarkers(brand: brand)
+        var gen: [llama_token] = []
         var out = ""
+        var produced = 0
         var pos = nPrompt
+        let t0 = Date()
 
         for _ in 0..<maxTokens {
             guard pos < cap else { break }
-            guard let logits = llama_get_logits_ith(c, -1) else { break }
-
+            guard let lp = llama_get_logits_ith(c, -1) else { break }
             let nVocab = Int(llama_vocab_n_tokens(v))
+
+            var pen: [Float]?
+            if gen.count >= 8 {
+                pen = [Float](repeating: 1.0, count: nVocab)
+                for (i, t) in gen.enumerated() {
+                    let idx = Int(t)
+                    guard idx > 0, idx < nVocab else { continue }
+                    let back = gen.count - i
+                    pen![idx] = back <= 8 ? 0.45 : (back <= 24 ? 0.72 : 0.9)
+                }
+            }
+
             var best: llama_token = 0
             var bestVal: Float = -.infinity
             for i in 0..<nVocab {
-                let val = logits[i]
-                if val > bestVal { bestVal = val; best = llama_token(i) }
+                let score = pen == nil ? lp[i] : lp[i] * pen![i]
+                if score > bestVal { bestVal = score; best = llama_token(i) }
             }
             if best == llama_vocab_eos(v) { break }
 
             var buf = [CChar](repeating: 0, count: 512)
             let n = Int(llama_token_to_piece(v, best, &buf, Int32(buf.count), 0, true))
+            gen.append(best)
             if n > 0 {
                 let bytes = buf.prefix(n).map { UInt8(bitPattern: $0) }
                 let piece = String(bytes: bytes, encoding: .utf8) ?? ""
+                let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+                if markers.contains(where: { trimmed.contains($0) }) { break }
                 out += piece
                 onToken?(piece)
+                produced += 1
             }
 
             var b = llama_batch_init(1, 0, 1)
@@ -136,9 +221,18 @@ final class LlamaEngine {
             let rc = llama_decode(c, b)
             llama_batch_free(b)
             if rc != 0 { break }
-
             pos += 1
-            activeTokens = pos
+        }
+
+        let dt = Date().timeIntervalSince(t0)
+        let used = pos
+        let rate = dt > 0 ? Double(produced) / dt : 0
+        DispatchQueue.main.async {
+            self.ctxUsed = used
+            self.tps = rate
+            self.note = produced > 0
+                ? "本次 \(produced) token · \(String(format: "%.1f", rate)) tok/s"
+                : "没有输出"
         }
         return out
     }
