@@ -2,6 +2,7 @@ import SwiftUI
 
 struct PerfView: View {
     @EnvironmentObject private var device: DeviceProfile
+    @EnvironmentObject private var engine: LlamaEngine
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -9,24 +10,39 @@ struct PerfView: View {
         ScrollView {
             VStack(spacing: 14) {
                 LazyVGrid(columns: columns, spacing: 12) {
-                    metricCard("生成速度", value: "18.4", unit: "tok/s")
+                    metricCard("生成速度",
+                               value: engine.tps > 0 ? String(format: "%.1f", engine.tps) : "—",
+                               unit: "tok/s",
+                               tip: engine.tps > 0 ? "本次实测" : "生成一次后显示")
                     metricCard("内存利用率",
                                value: String(format: "%.1f", device.usageRatio * 100),
-                               unit: "%")
-                    metricCard("Metal 加速", value: "已启用", unit: "")
-                    metricCard("上下文占用", value: "39", unit: "%")
+                               unit: "%",
+                               tip: String(format: "%.2f / %.1f GB", device.effectiveUsedGB, device.budgetGB))
+                    metricCard("Metal 加速",
+                               value: engine.metalOn ? "已启用" : "未启用",
+                               unit: engine.metalOn ? "\(engine.metalLayers) 层" : "CPU",
+                               tip: engine.metalOn ? "权重上 GPU" : "全部跑 CPU")
+                    let ctxPct = engine.ctxTotal > 0 ? Double(engine.ctxUsed) / Double(engine.ctxTotal) * 100 : 0
+                    metricCard("上下文占用",
+                               value: String(format: "%.0f", ctxPct),
+                               unit: "%",
+                               tip: engine.ctxTotal > 0
+                                    ? "\(engine.ctxUsed) / \(engine.ctxTotal) token"
+                                    : "未加载模型")
                 }
 
                 budgetCard
 
                 tierCard
+
+                engineCard
             }
             .padding(14)
         }
         .background(RMTheme.bg)
     }
 
-    private func metricCard(_ title: String, value: String, unit: String) -> some View {
+    private func metricCard(_ title: String, value: String, unit: String, tip: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(title)
                 .font(.system(size: 12))
@@ -41,6 +57,9 @@ struct PerfView: View {
                         .foregroundStyle(RMTheme.textSub)
                 }
             }
+            Text(tip)
+                .font(.system(size: 10))
+                .foregroundStyle(RMTheme.textSub)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
@@ -101,6 +120,30 @@ struct PerfView: View {
             infoRow("KV 量化", device.tier.kvQuant ? "开（省内存）" : "关")
             infoRow("Metal 层数", "\(device.tier.gpuLayers)")
             infoRow("关键词筛推理", device.tier.requiresKeywordFilter ? "强制开启" : "按需")
+        }
+        .padding(14)
+        .background(RMTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    }
+
+    private var engineCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("引擎状态")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(RMTheme.text)
+                Spacer()
+                if engine.isLoaded {
+                    Button("卸载模型") {
+                        LlamaEngine.shared.unload()
+                        device.usedGB = device.footprintGB
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(RMTheme.danger)
+                }
+            }
+            infoRow("已加载", engine.loadedModelId ?? "无")
+            infoRow("当前状态", engine.note)
         }
         .padding(14)
         .background(RMTheme.panel)
