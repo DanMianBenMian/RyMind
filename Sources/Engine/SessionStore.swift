@@ -72,17 +72,22 @@ final class SessionStore: ObservableObject {
         save()
     }
 
+    /// 真删。删的是当前会话就把当前指到剩下第一个；全删光了自动建新的。
     func delete(_ id: UUID) {
-        guard sessions.count > 1 else { return }
-        guard currentId != id else {
-            if let idx = sessions.firstIndex(where: { $0.id == id }) {
-                let next = sessions[(idx == 0 ? 1 : idx - 1)]
-                currentId = next.id
-            }
-            return
+        guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
+        let wasCurrent = (currentId == id)
+        sessions.remove(at: idx)
+        if wasCurrent || currentId != sessions[0].id {
+            currentId = sessions[0].id
         }
-        sessions.removeAll { $0.id == id }
+        if sessions.isEmpty { makeCurrentSession(title: "新对话"); return }
         save()
+    }
+
+    /// 新建对话并切过去（会话列表两处按钮都调这个）
+    @discardableResult
+    func newSession(title: String = "新对话") -> ChatSession {
+        return makeCurrentSession(title: title)
     }
 
     func rename(_ id: UUID, to title: String) {
