@@ -127,10 +127,41 @@ final class ModelStore: ObservableObject {
 
     /// 手动添加一个自定义模型（粘贴 GGUF 直链）
     func addCustom(name: String, url: String, sizeGB: Double = 1.0) {
-        let id = "custom-\(UUID().uuidString.prefix(8))"
+        let id = "custom-" + UUID().uuidString.prefix(8).lowercased()
         models.append(RMModel(id: id, name: name, brand: "自定义", kind: .llm,
                               quant: "GGUF", sizeGB: sizeGB, state: .notDownloaded,
                               primaryURL: nil, mirrorURL: url))
+    }
+
+    // MARK: - 第二种：上传本地模型文件
+
+    private var modelsDir: String {
+        (docsPath as NSString).appendingPathComponent("Models")
+    }
+
+    var docsPath: String {
+        NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first ?? ""
+    }
+
+    /// 从本机选一个 .gguf（或改过名的模型文件）→ 拷进 Models 目录 → 立刻可用
+    @discardableResult
+    func addUploaded(from src: URL) -> String {
+        let srcName = src.lastPathComponent
+        let data = (try? Data(contentsOf: src)) ?? Data()
+        let id = "custom-" + UUID().uuidString.prefix(8).lowercased()
+        try? FileManager.default.createDirectory(atPath: modelsDir, withIntermediateDirectories: true)
+        let dest = (modelsDir as NSString).appendingPathComponent(id + ".gguf")
+        if data.isEmpty {
+            // 文件拿不出来也别白忙：至少把名字记下来
+            try? FileManager.default.copyItem(at: src, to: URL(fileURLWithPath: dest))
+        } else {
+            try? data.write(to: URL(fileURLWithPath: dest))
+        }
+        let sizeGB = max(Double(data.count) / 1073741824.0, 0.1)
+        models.append(RMModel(id: id, name: srcName, brand: "本地", kind: .llm,
+                              quant: "GGUF", sizeGB: sizeGB, state: .ready,
+                              primaryURL: nil, mirrorURL: ""))
+        return id
     }
 
     /// 任务路由：按问题关键词挑最合适的已就绪模型。
