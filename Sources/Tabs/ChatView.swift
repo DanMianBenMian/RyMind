@@ -45,6 +45,22 @@ private struct FilePickerSheet: View {
     }
 }
 
+/// 键盘弹起时把弹层收掉，避免点输入框冒出会话选择器打断键盘。
+/// 用 addObserver 而不是 NotificationCenter.publisher（后者 iOS17+ 才有，当前 SDK 没有）。
+final class RMKeyboardGuard: ObservableObject {
+    @Published var keyboardUp = false
+    private var token: NSObjectProtocol?
+    init() {
+        token = NotificationCenter.default.addObserver(
+            forName: UIKeyboardWillShowNotification,
+            object: nil,
+            queue: .main) { [weak self] _ in
+                self?.keyboardUp = true
+            }
+    }
+    deinit { if let token { NotificationCenter.default.removeObserver(token) } }
+}
+
 struct ChatView: View {
     @EnvironmentObject private var lock: TaskLock
     @EnvironmentObject private var device: DeviceProfile
@@ -65,6 +81,8 @@ struct ChatView: View {
     @State private var attachedSkillName: String?
     @State private var attachedFile: PickedFile?
     @State private var showFilePick = false
+
+    @StateObject private var kb = RMKeyboardGuard()
 
     init(landscape: Bool) { self.landscape = landscape }
 
@@ -102,18 +120,17 @@ struct ChatView: View {
             mainColumn
         }
         .background(RMTheme.bg)
-        .sheet(isPresented: $showSessions) { sessionSheet }
+        .sheet(isPresented: Binding(get: { self.showSessions && !self.kb.keyboardUp },
+                                    set: { v in self.showSessions = v; self.kb.keyboardUp = false })) {
+            sessionSheet
+        }
         .sheet(isPresented: $showAttach) { attachSheet }
-        .sheet(isPresented: $showFilePick) {
+        .sheet(isPresented: Binding(get: { self.showFilePick && !self.kb.keyboardUp },
+                                    set: { v in self.showFilePick = v; self.kb.keyboardUp = false })) {
             FilePickerSheet { path, name in
                 attachedFile = PickedFile(path: path, name: name)
                 showFilePick = false
             }
-        }
-        // 兜底：键盘弹起来时，任何不该开的弹层一律收掉（之前点输入框会冒出会话选择器）
-        .onReceive(NotificationCenter.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-            showSessions = false
-            showFilePick = false
         }
     }
 
