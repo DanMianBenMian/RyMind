@@ -212,7 +212,7 @@ struct RMBitmap {
         fmt.preferredRange = .standard
         let rend = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: fmt)
         return rend.image { ctx in
-            CGContextSetInterpolationQuality(ctx.cgContext, CGInterpolationQuality.high)
+            ctx.cgContext.interpolationQuality = CGInterpolationQuality.high
             img.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
         }
     }
