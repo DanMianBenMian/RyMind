@@ -3,6 +3,10 @@ import SwiftUI
 /// 「高级」页：温度 / 重复惩罚 / 随机性(top-p) / 输出长度
 struct AdvancedView: View {
     @EnvironmentObject private var device: DeviceProfile
+    // 用单例而不是 environmentObject：不管这页是从导航里进还是从弹层里进，都能拿到日志
+    @ObservedObject private var trace = RMTrace.shared
+
+    @State private var copyTip = ""
 
     @State private var temp: Double
     @State private var pen: Double
@@ -115,6 +119,40 @@ struct AdvancedView: View {
                 LabeledContent("重复惩罚") { Text(String(format: "%.2f", s.repeatPenalty)).foregroundStyle(RMTheme.text) }
                 LabeledContent("随机性 top-p") { Text(String(format: "%.2f", s.topP)).foregroundStyle(RMTheme.text) }
                 LabeledContent("输出长度") { Text("\(s.maxTokens) token").foregroundStyle(RMTheme.text) }
+            }
+
+            Section("诊断日志（出 bug 时看这里，点「复制」发给我）") {
+                if trace.entries.isEmpty {
+                    Text("暂无日志").font(.system(size: 12)).foregroundStyle(RMTheme.textSub)
+                } else {
+                    ForEach(trace.entries.suffix(8)) { e in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(e.body)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(e.tag == "crash" ? RMTheme.danger : RMTheme.textSub)
+                                .lineLimit(4)
+                        }
+                    }
+                }
+                HStack(spacing: 10) {
+                    Button {
+                        UIPasteboard.general.string = trace.exportText()
+                        copyTip = "已复制，粘给 Ryan 就行"
+                    } label: {
+                        Label("复制诊断日志", systemImage: "doc.on.doc")
+                            .font(.system(size: 12))
+                    }
+                    Button(role: .destructive) { trace.clear() } label: {
+                        Label("清空", systemImage: "trash")
+                            .font(.system(size: 12))
+                    }
+                    Spacer()
+                }
+                if !copyTip.isEmpty {
+                    Text(copyTip).font(.system(size: 11)).foregroundStyle(RMTheme.accent)
+                }
+                Text("完整日志也写在文件库的 rmind-diag.log；崩溃（生图闪退、 chat 闪退）会自动记进这里和文件库。")
+                    .font(.system(size: 10)).foregroundStyle(RMTheme.textSub)
             }
         }
         .background(RMTheme.bg)
