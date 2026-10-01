@@ -73,14 +73,23 @@ final class SessionStore: ObservableObject {
     }
 
     /// 真删。删的是当前会话就把当前指到剩下第一个；全删光了自动建新的。
+    /// ⚠️ 顺序很关键：remove 之后先判空再取 sessions[0]，否则删最后一个会下标越界崩溃。
     func delete(_ id: UUID) {
         guard let idx = sessions.firstIndex(where: { $0.id == id }) else { return }
         let wasCurrent = (currentId == id)
         sessions.remove(at: idx)
-        if wasCurrent || currentId != sessions[0].id {
+        if sessions.isEmpty {
+            // 一个不剩 → 自动新建一个空的，界面不至于空掉
+            makeCurrentSession(title: "新对话")
+            return
+        }
+        if wasCurrent {
+            // 删掉的是当前会话：接着往下走（原来的下一个，没了就取最后一个）
+            let nextIdx = min(idx, sessions.count - 1)
+            currentId = sessions[nextIdx].id
+        } else if !sessions.contains(where: { $0.id == currentId }) {
             currentId = sessions[0].id
         }
-        if sessions.isEmpty { makeCurrentSession(title: "新对话"); return }
         save()
     }
 
