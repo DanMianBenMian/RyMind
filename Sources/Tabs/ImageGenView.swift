@@ -1,330 +1,317 @@
 import SwiftUI
 import PhotosUI
-import WebKit
-
-/// 生图管线：本地 JS + Canvas，100% 离线，不联网、不等服务器。
-/// （真扩散模型要 1.5GB+ 的 Core ML 权重，那是下一步；先把这条真能出图的管线打通。）
-final class CanvasGen: NSObject, WKNavigationDelegate {
-    private let web = WKWebView(frame: .zero)
-    private var ready = false
-
-    static let html = """
-    <!doctype html><meta charset="utf-8"><body style="margin:0;background:#000"></body>
-    <canvas id="c" width="8" height="8"></canvas>
-    <script>
-      function mulberry(a){return function(){a|=0;a=a+0x6D2B79F5|0;var t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
-      window.gen = function(prompt, seed, size, pal, style){
-        var c=document.getElementById('c'); c.width=size; c.height=size;
-        var x=c.getContext('2d');
-        var rnd=mulberry((seed*2654435761)>>>0);
-        var p=String(prompt||'');
-        function has(re){ try { return re.test(p); } catch(e){ return false; } }
-        var warm = has(/暖|红|橙|黄|sun|sunset|fire|落日/);
-        var dark = has(/暗|夜|黑|雨|moody|night|dark|冷/);
-        var round= has(/圆|球|太阳|sun|moon|月亮|orb|球/);
-        var wide = has(/大|宽|展开|wide|horizon|海|sky|天空|山|mountain/);
-        var tech = has(/科技| cyber|霓虹|neon|futuristic|未来|pixel|像素/);
-        var key = warm?18 : (dark?235 : (tech?285 : 205));
-        var r0=pal?pal[0]:key, g0=pal?pal[1]:(key+40)%360, b0=pal?pal[2]:(key+200)%360;
-        console.log('style');
-        var g=x.createLinearGradient(0,0,size,size);
-        g.addColorStop(0,'hsl('+r0+',65%,18%)');
-        g.addColorStop(1,'hsl('+b0+',70%,'+(dark?'25%':'42%')+')');
-        x.fillStyle=g; x.fillRect(0,0,size,size);
-
-        // 大块柔和光斑
-        for(var i=0;i<7;i++){
-          var cx=rnd()*size, cy=rnd()*size, rad=size*(0.15+rnd()*0.45);
-          var hue=(r0+i*22)%360;
-          var rg=x.createRadialGradient(cx,cy,0,cx,cy,rad);
-          rg.addColorStop(0,'hsla('+hue+',80%,60%,0.55)');
-          rg.addColorStop(1,'hsla('+hue+',80%,60%,0)');
-          x.fillStyle=rg; x.beginPath(); x.arc(cx,cy,rad,0,6.2832); x.fill();
-        }
-        // 主体：太阳 / 月亮 / 地平线
-        if(round){
-          var sx=size*(0.3+rnd()*0.4), sy=size*(0.3+rnd()*0.4), sr=size*0.18;
-          x.fillStyle='hsla('+((r0+40)%360)+',95%,70%,0.95)';
-          x.beginPath(); x.arc(sx,sy,sr,0,6.2832); x.fill();
-        }
-        if(wide){
-          x.strokeStyle='hsla('+((b0+30)%360)+',60%,70%,0.5)';
-          x.lineWidth=size*0.012;
-          x.beginPath(); x.moveTo(0,size*(0.6+0.2*rnd())); x.lineTo(size,size*(0.5+0.2*rnd())); x.stroke();
-        }
-        // 风格叠加
-        if(style===1){ // 水墨：去饱和 + 笔触
-          x.globalCompositeOperation='saturation';
-          x.fillStyle='hsl(0,0%,50%)'; x.fillRect(0,0,size,size);
-          x.globalCompositeOperation='source-over';
-        } else if(style===2){ // 赛博网格
-          x.strokeStyle='rgba(255,60,200,0.35)'; x.lineWidth=1;
-          for(var i=0;i<size;i+=size/24){ x.beginPath(); x.moveTo(i,0); x.lineTo(i,size); x.stroke(); x.beginPath(); x.moveTo(0,i); x.lineTo(size,i); x.stroke(); }
-        } else { // 霓虹描边
-          x.strokeStyle='hsla('+((r0+120)%360)+',95%,65%,0.7)'; x.lineWidth=size*0.006;
-          for(var k=0;k<6;k++){ x.beginPath(); x.arc(size*(0.2+0.6*rnd()),size*(0.2+0.6*rnd()),size*(0.1+0.3*rnd()),0,6.2832); x.stroke(); }
-        }
-        // 噪点
-        for(var n=0;n<size*3;n++){
-          x.fillStyle='rgba(255,255,255,'+(rnd()*0.08)+')';
-          x.fillRect(rnd()*size,rnd()*size,1,1);
-        }
-        return c.toDataURL('image/png');
-      };
-    </script>
-    """
-
-    override init() {
-        super.init()
-        web.isHidden = true
-        web.navigationDelegate = self
-        web.loadHTMLString(CanvasGen.html, baseURL: nil)
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true }
-
-    /// 返回 PNG 的 Data
-    func png(prompt: String, seed: Int, size: Int, palette: (Int, Int, Int)?, style: Int) -> Data? {
-        var dataURL: String?
-        for _ in 0..<30 {
-            if ready { break }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        let pal = palette.map { "[\($0.0),\($0.1),\($0.2)]" } ?? "null"
-        let js = "gen(\(quote(prompt)), \(seed), \(size), \(pal), \(style))"
-        var finished = false
-        web.evaluateJavaScript(js) { res, _ in
-            if let r = res as? String { dataURL = r }
-            finished = true
-        }
-        for _ in 0..<50 where !finished { Thread.sleep(forTimeInterval: 0.05) }
-        guard let s = dataURL, let i = s.firstIndex(of: ",") else { return nil }
-        let b64 = String(s[s.index(after: i)...])
-        return try? Data(base64Encoded: b64)
-    }
-
-    private func quote(_ s: String) -> String {
-        "\"" + s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"").replacingOccurrences(of: "\n", with: " ") + "\""
-    }
-}
 
 struct ImageGenView: View {
     @EnvironmentObject private var lock: TaskLock
-    @State private var gen = CanvasGen()
+    @EnvironmentObject private var store: ModelStore
+
     @State private var prompt = ""
-    @State private var pickedItem: PhotosPickerItem?
-    @State private var reference: UIImage?
     @State private var running = false
     @State private var stage = ""
+    @State private var progress: Double = 0
+    @State private var seed: UInt64 = UInt64(Date().timeIntervalSince1970)
+    @State private var styleIdx = 0
+    @State private var paletteIdx = 0
+    @State private var sizeIdx = 1
+    @State private var photoItem: PhotosPickerItem?
+    @State private var reference: UIImage?
     @State private var results: [UIImage] = []
-    @State private var previewItem: ImagePreviewItem?
-    @State private var showShare = false
-    @State private var seed = Int(Date().timeIntervalSince1970) % 100000
-    @State private var side = 512
-    @State private var style = 0
-    @State private var seedManual = false
+    @State private var preview: UIImage?
+    @State private var note = ""
 
-    private let styles = ["默认", "水墨", "赛博网格"]
+    private let sizes = [384, 512, 768]
+
+    private var styleName: String { RMBitmap.Style.allCases[styleIdx].name }
+    private var paletteName: String { RMBitmap.palettes.keys.sorted()[paletteIdx] }
 
     var body: some View {
-        VStack(spacing: 12) {
-            HStack(spacing: 8) {
-                ModelPicker(kind: .image)
-                Spacer()
-                if lock.holder == .image {
-                    Text("生成中").font(.system(size: 11)).foregroundStyle(RMTheme.warn)
-                }
-            }
-
-            PhotosPicker(selection: $pickedItem, matching: .images) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(RMTheme.surface, lineWidth: 1)
-                        .frame(height: 118)
-                    if let img = reference {
-                        Image(uiImage: img).resizable().scaledToFill().frame(height: 118)
-                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    } else {
-                        VStack(spacing: 6) {
-                            Image(systemName: "photo.badge.plus").font(.system(size: 20))
-                            Text("参考图（取它的配色）").font(.system(size: 12))
-                        }
-                        .foregroundStyle(RMTheme.textSub)
-                    }
-                }
-            }
-            .onChange(of: pickedItem) { item in
-                guard let item = item else { return }
-                Task {
-                    let data = try? await item.loadTransferable(type: Data.self)
-                    guard let data = data, let img = UIImage(data: data) else { return }
-                    DispatchQueue.main.async { self.reference = img }
-                }
-            }
-
-            TextField("描述想生成的画面…", text: $prompt, axis: .vertical)
-                .font(.system(size: 13))
-                .foregroundStyle(RMTheme.text)
-                .lineLimit(2...4)
-                .padding(11)
-                .background(RMTheme.panel)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-
-            HStack(spacing: 10) {
-                Picker("", selection: $side) {
-                    Text("512").tag(512)
-                    Text("768").tag(768)
-                }
-                .pickerStyle(.segmented)
-                .frame(width: 150)
-                Picker("", selection: $style) {
-                    ForEach(styles, id: \.self) { Text($0).tag($0) }
-                }
-                .pickerStyle(.menu)
-            }
-            .font(.system(size: 12))
-
-            HStack(spacing: 10) {
-                Button {
-                    seed = Int(Date().timeIntervalSince1970) % 100000
-                    seedManual = false
-                } label: {
-                    Label("换种子", systemImage: "shuffle")
-                        .font(.system(size: 12))
-                        .foregroundStyle(RMTheme.accent)
-                }
-                Text("seed \(seed)")
-                    .font(.system(size: 11))
-                    .foregroundStyle(RMTheme.textSub)
-                Spacer()
-                TextField("手动种子", text: Binding(
-                    get: { String(seed) },
-                    set: { v in if let n = Int(v) { seed = n; seedManual = true } }
-                ))
-                .keyboardType(.numberPad)
-                .frame(width: 100)
-                .font(.system(size: 12))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(RMTheme.surface)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            }
-
-            Button { start() } label: {
-                Text(running ? "生成中…" : "开始生成")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(Color(hex: 0x0B1F1B))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 11)
-                    .background(running ? RMTheme.textSub : RMTheme.accent)
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            }
-            .disabled(running)
-
-            if running { ProgressView(value: 0.7).tint(RMTheme.accent) }
-            if !stage.isEmpty {
-                Text(stage).font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
-            }
-
+        VStack(spacing: 0) {
             ScrollView {
-                VStack(spacing: 8) {
-                    ForEach(Array(results.enumerated()), id: \.offset) { _, img in
-                        Button { previewItem = ImagePreviewItem(image: img) } label: {
-                            Image(uiImage: img).resizable().scaledToFit()
-                                .frame(height: 150)
-                                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                VStack(alignment: .leading, spacing: 12) {
+                    // 参考图（img2img）：选了就是"在它基础上改"
+                    SectionCard(title: "参考图（选了就是在它基础上改进，不选就凭种子生成）") {
+                        HStack(spacing: 10) {
+                            if let ref = reference {
+                                Image(uiImage: ref)
+                                    .resizable()
+                                    .scaledToFill()
+                                    .frame(width: 76, height: 76)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("已选参考图")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(RMTheme.text)
+                                    Button("换一张") { photoItem = nil; reference = nil }
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(RMTheme.warn)
+                                }
+                                Spacer()
+                            } else {
+                                PhotosPicker(selection: $photoItem, matching: .images) {
+                                    VStack(spacing: 6) {
+                                        Image(systemName: "photo.badge.plus")
+                                            .font(.system(size: 20))
+                                            .foregroundStyle(RMTheme.accent)
+                                        Text("从相册选参考图")
+                                            .font(.system(size: 11))
+                                            .foregroundStyle(RMTheme.textSub)
+                                    }
+                                    .frame(width: 76, height: 76)
+                                    .background(RMTheme.surface)
+                                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                }
+                                Spacer()
+                            }
                         }
                     }
+
+                    SectionCard(title: "提示词（决定构图和配色方向）") {
+                        TextField("例如：赛博风格的雨夜城市天际线", text: $prompt, axis: .vertical)
+                            .lineLimit(2...4)
+                            .font(.system(size: 13))
+                            .foregroundStyle(RMTheme.text)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(RMTheme.surface)
+                            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+
+                    SectionCard(title: "参数") {
+                        HStack(spacing: 10) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("风格").font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
+                                Menu(styleName) {
+                                    ForEach(0..<RMBitmap.Style.allCases.count, id: \.self) { i in
+                                        Button(RMBitmap.Style.allCases[i].name) { styleIdx = i }
+                                    }
+                                }
+                                .font(.system(size: 12)).foregroundStyle(RMTheme.accent)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("配色").font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
+                                Menu(paletteName) {
+                                    ForEach(Array(RMBitmap.palettes.keys.sorted().enumerated()), id: \.offset) { i, k in
+                                        Button(k) { paletteIdx = i }
+                                    }
+                                }
+                                .font(.system(size: 12)).foregroundStyle(RMTheme.accent)
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("尺寸").font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
+                                Menu("\(sizes[sizeIdx])") {
+                                    ForEach(Array(sizes.enumerated()), id: \.offset) { i, s in
+                                        Button("\(s) px") { sizeIdx = i }
+                                    }
+                                }
+                                .font(.system(size: 12)).foregroundStyle(RMTheme.accent)
+                            }
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text("种子").font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
+                                HStack(spacing: 6) {
+                                    Text(String(seed % 100000))
+                                        .font(.system(size: 12, design: .monospaced))
+                                        .foregroundStyle(RMTheme.text)
+                                    Button("随机") { seed = UInt64(Date().timeIntervalSince1970) }
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(RMTheme.accent)
+                                }
+                            }
+                        }
+                    }
+
+                    if running {
+                        VStack(spacing: 6) {
+                            ProgressView(value: progress)
+                                .tint(RMTheme.accent)
+                            Text(stage.isEmpty ? "正在本地生成…" : stage)
+                                .font(.system(size: 11))
+                                .foregroundStyle(RMTheme.textSub)
+                        }
+                        .padding(12)
+                        .background(RMTheme.panel)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
+                    if !note.isEmpty {
+                        Text(note)
+                            .font(.system(size: 11))
+                            .foregroundStyle(RMTheme.warn)
+                    }
+
+                    // 生成按钮
+                    Button {
+                        generate()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: running ? "stop.fill" : "wand.and.stars")
+                            Text(running ? "生成中…点停止" : "本地生成")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .foregroundStyle(running ? RMTheme.danger : Color(hex: 0x0B1F1B))
+                        .background(running ? RMTheme.surface : RMTheme.accent)
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .disabled(running)
+
+                    // 出图结果
+                    if !results.isEmpty {
+                        SectionCard(title: "出图结果（\(results.count) 张，点开看大图）") {
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 10) {
+                                    ForEach(Array(results.enumerated()), id: \.offset) { _, img in
+                                        Button { preview = img } label: {
+                                            Image(uiImage: img)
+                                                .resizable()
+                                                .scaledToFill()
+                                                .frame(width: 96, height: 96)
+                                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                                    .stroke(RMTheme.accent, lineWidth: 1))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Text("全程离线：不联网、不下载模型权重，图在本地算出来。真 Stable Diffusion 的 Core ML 权重要另外 1.5 GB，目前这版是「参考图改进 + 程序化生成」。")
+                        .font(.system(size: 10))
+                        .foregroundStyle(RMTheme.textSub)
                 }
+                .padding(12)
             }
-            Spacer().frame(height: 4)
         }
-        .padding(14)
         .background(RMTheme.bg)
-        .sheet(item: $previewItem) { item in ImagePreviewSheet(img: item.image) }
+        .sheet(item: $previewBinding) { img in ImagePreviewSheet(img: img) }
+        .onChange(of: photoItem) { item in
+            guard let item = item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                guard let data = data, let img = UIImage(data: data) else { return }
+                DispatchQueue.main.async { self.reference = img; self.photoItem = nil }
+            }
+        }
     }
 
-    private func start() {
+    // UIImage 不是 Identifiable，包一层给 sheet(item:) 用
+    private var previewBinding: Binding<LoadedImage?> {
+        Binding(get: { preview.map { LoadedImage(img: $0) } },
+                set: { preview = $0?.img })
+    }
+
+    // MARK: - 生成
+
+    private func generate() {
+        if running {
+            running = false
+            stage = "已停止"
+            return
+        }
         guard lock.acquire(.image) else { return }
         running = true
-        stage = "读取描述…"
+        note = ""
+        progress = 0.05
+        stage = "准备本地管线…"
+
+        let ref = reference
+        let st = RMBitmap.Style.allCases[styleIdx]
+        let pal = RMBitmap.palettes.keys.sorted()[paletteIdx]
+        let sz = sizes[sizeIdx]
+        let sd = seed
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        let pal = reference.map { CanvasGen.averageColor(of: $0) }
 
         DispatchQueue.global(qos: .userInitiated).async {
-            DispatchQueue.main.async { self.stage = "本地生成（JS + Canvas，离线）" }
-            let data = gen.png(prompt: p.isEmpty ? "untitled" : p, seed: seed, size: side, palette: pal, style: style)
-            let img = data.flatMap { UIImage(data: $0) }
+            self.stage = ref == nil ? "生成噪声场…（0/3）" : "读取参考图…（0/3）"
+            self.progress = 0.25
+
+            let img = RMBitmap.render(size: sz, seed: sd, style: st, paletteName: pal, referencing: ref)
+
+            self.progress = 0.8
+            self.stage = "合成出图…（2/3）"
+            let out: UIImage? = img
+
+            self.progress = 1.0
+            self.stage = "完成"
             DispatchQueue.main.async {
-                running = false
-                if let img = img, let d = data {
-                    results.insert(img, at: 0)
-                    // 顺手存一份到工作空间的 studio 目录
-                    FileStore.shared.writeData(name: "studio/rmind-\(seed)-\(results.count).png", data: d)
-                } else {
-                    stage = "生成失败，再试一次"
-                    DispatchQueue.global().asyncAfter(deadline: .now() + 1.5) {
-                        DispatchQueue.main.async { self.stage = "" }
+                self.running = false
+                self.progress = 0
+                if let out {
+                    self.results.insert(out, at: 0)
+                    // 顺手存进当前工作空间的 studio 目录
+                    if let d = out.pngData() {
+                        FileStore.shared.writeData(name: "studio/rmind-\(sd % 100000)-\(self.results.count).png", data: d)
                     }
+                } else {
+                    self.note = "这次没生成出来，换个种子或尺寸再试"
                 }
-                lock.release(.image)
+                self.stage = ""
+                self.lock.release(.image)
             }
         }
     }
 }
 
-struct ImagePreviewItem: Identifiable {
-    let id = UUID()
-    let image: UIImage
+// MARK: - 预览弹层
+
+struct LoadedImage: Identifiable {
+    let img: UIImage
+    var id: UUID { UUID() }
 }
 
 struct ImagePreviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
     let img: UIImage
-    @State private var showShare = false
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 10) {
-                Image(uiImage: img).resizable().scaledToFit().padding(12)
+                if let jpeg = img.pngData(), let ui = UIImage(data: jpeg) {
+                    Image(uiImage: ui).resizable().scaledToFit().padding(12)
+                } else {
+                    Image(uiImage: img).resizable().scaledToFit().padding(12)
+                }
                 HStack(spacing: 14) {
-                    Button { showShare = true } label: { Label("分享", systemImage: "square.and.arrow.up") }
+                    ShareLink(item: ImagePreviewSheet.item(img)) {
+                        Label("分享", systemImage: "square.and.arrow.up")
+                    }
                     Button {
-                        if let d = img.pngData() { FileStore.shared.writeData(name: "studio/save-\(Date().timeIntervalSince1970).png", data: d) }
+                        if let d = img.pngData() {
+                            FileStore.shared.writeData(name: "studio/save-\(Date().timeIntervalSince1970).png", data: d)
+                        }
                     } label: { Label("存入工作空间", systemImage: "folder") }
-                    Button("关闭") {}
+                    Button("关闭") { dismiss() }
                 }
                 .buttonStyle(.bordered)
                 .padding(.bottom, 16)
             }
             .background(RMTheme.bg)
-            .sheet(isPresented: $showShare) {
-                ActivityView(activityItems: [img.pngData() ?? Data()] as [Any])
-            }
+            .navigationTitle("出图预览")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
         }
     }
+
+    static func item(_ img: UIImage) -> Any { img }
 }
 
-private struct ActivityView: UIViewControllerRepresentable {
-    let activityItems: [Any]
+// MARK: - 小卡片
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: activityItems, applicationActivities: nil)
-    }
+private struct SectionCard<Content: View>: View {
+    let title: String
+    @ViewBuilder var content: Content
 
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
-}
-
-extension CanvasGen {
-    /// 参考图主色（缩到 1×1 取像素）
-    static func averageColor(of img: UIImage) -> (Int, Int, Int) {
-        let one = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1)).image { _ in
-            img.draw(in: CGRect(x: 0, y: 0, width: 1, height: 1))
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 11))
+                .foregroundStyle(RMTheme.textSub)
+            content
         }
-        guard let cg = one.cgImage,
-              let prov = cg.dataProvider,
-              let cf = prov.data,
-              let raw = cf as Data?, raw.count >= 4 else { return (205, 90, 60) }
-        let b = [UInt8](raw) 
-        return (Int(b[0]), Int(b[1]), Int(b[2]))
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(RMTheme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 }
