@@ -305,9 +305,15 @@ final class RMPixelJob {
     }
 
     func makeImage() -> UIImage? {
+        RMTrace.shared.log("makeImage small=\(small) -> size=\(opt.size) buf=\(buf.count)", tag: "bitmap")
         autoreleasepool {
-            guard let smallImg = RMBitmap.drawBuffer(buf, size: small) else { return nil }
-            return RMBitmap.upscale(smallImg, to: opt.size)
+            guard let smallImg = RMBitmap.drawBuffer(buf, size: small) else {
+                RMTrace.shared.log("makeImage drawBuffer 返回 nil", tag: "bitmap")
+                return nil
+            }
+            let up = RMBitmap.upscale(smallImg, to: opt.size)
+            RMTrace.shared.log("makeImage upscale 结果=\(up != nil)", tag: "bitmap")
+            return up
         }
     }
 
