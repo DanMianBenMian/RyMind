@@ -44,7 +44,7 @@ struct AdvancedView: View {
             }
 
             Section {
-                Label(title, systemImage: sym)
+                Label("温度（越小越稳，越大越爱瞎编）", systemImage: "thermometer")
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $temp, in: 0...1, step: 0.05)
@@ -57,7 +57,7 @@ struct AdvancedView: View {
             }
 
             Section {
-                Label(title, systemImage: sym)
+                Label("重复惩罚（越高越不复读）", systemImage: "repeat")
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $pen, in: 0...0.5, step: 0.01)
@@ -68,7 +68,7 @@ struct AdvancedView: View {
             }
 
             Section {
-                Label(title, systemImage: sym)
+                Label("随机性 top-p（0.9 够用，1 = 不筛）", systemImage: "dice")
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $topP, in: 0.1...1, step: 0.05)
@@ -79,7 +79,7 @@ struct AdvancedView: View {
             }
 
             Section {
-                Label(title, systemImage: sym)
+                Label("输出长度（最多吐多少 token）", systemImage: "arrow.right")
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $maxTok, in: 64...1024, step: 32)
