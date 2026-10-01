@@ -16,8 +16,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
-        CFBundleShortVersionString: "0.4.0"
-        CFBundleVersion: "5"
+        CFBundleShortVersionString: "0.4.1"
+        CFBundleVersion: "6"
         LSRequiresIPhoneOS: true
         UIRequiredDeviceCapabilities:
           - arm64
@@ -26,6 +26,8 @@ targets:
         # 缺了它 → iPad 上按 iPhone 尺寸运行、四周黑边（构建全绿但看着不对）
         UILaunchScreen: {}
         NSDocumentsFolderUsageDescription: RyMind 需要访问文档目录以存放模型、Skill 与工作空间文件。
+    resources:
+      - path: Sources/Assets.xcassets
     settings:
       PRODUCT_BUNDLE_IDENTIFIER: com.research.rymind
       CODE_SIGN_IDENTITY: ""
