@@ -85,20 +85,20 @@ enum RMZip {
                 guard FileManager.default.fileExists(atPath: full.path, isDirectory: &isDir) else { continue }
                 let nameData = Data((rel.isEmpty ? base : base + "/" + rel).utf8)
 
-                let size: UInt32 = isDir.boolValue ? 0 : UInt32(FileManager.default.attributesOfItem(atPath: full.path)[.size] as? Int ?? 0)
-                let crc = isDir.boolValue ? 0 : crc32(byteArray: [UInt8](try? Data(contentsOf: full) ?? Data()))
+                let attrs = (try? FileManager.default.attributesOfItem(atPath: full.path)) ?? [:]
+                let size: UInt32 = isDir.boolValue ? 0 : UInt32((attrs[.size] as? Int) ?? 0)
+                let blob = (try? Data(contentsOf: full)) ?? Data()
+                let crc: UInt32 = isDir.boolValue ? 0 : crc32(byteArray: [UInt8](blob))
                 var method: UInt16 = 0
                 var load = Data()
 
                 if !isDir.boolValue, size > 0 {
-                    if let blob = try? Data(contentsOf: full) {
-                        let comp = deflate(blob)
-                        if comp.count < blob.count {
-                            method = 8
-                            load = comp
-                        } else {
-                            load = blob
-                        }
+                    let comp = deflate(blob)
+                    if comp.count < blob.count {
+                        method = 8
+                        load = comp
+                    } else {
+                        load = blob
                     }
                 }
 
