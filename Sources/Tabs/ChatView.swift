@@ -52,7 +52,7 @@ final class RMKeyboardGuard: ObservableObject {
     private var token: NSObjectProtocol?
     init() {
         token = NotificationCenter.default.addObserver(
-            forName: UIKeyboardWillShowNotification,
+            forName: UIResponder.keyboardWillShowNotification,
             object: nil,
             queue: .main) { [weak self] _ in
                 self?.keyboardUp = true
