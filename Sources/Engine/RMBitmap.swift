@@ -101,14 +101,14 @@ struct RMBitmap {
                 if hasRef {
                     // img2img：保留参考图颜色，噪声只动明暗和细节
                     let base = refRGB[i]
-                    var lum = refLum[i]
-                    if lum < 0 { lum = Float(t) }
-                    let detail = 0.55 + f1 * 0.5 - 0.25
-                    let bright = min(1.4, max(0.15, lum * detail + (t - 0.5) * 0.35))
+                    let lum0: Float = refLum[i] >= 0 ? refLum[i] : Float(t)
+                    let detail: Double = 0.55 + f1 * 0.5 - 0.25
+                    let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
                     col = (base.r * bright, base.g * bright, base.b * bright)
                     // 叠一点调色板的环境色，免得看过去还是原图
-                    let p = pal[Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))]
-                    let mix = 0.30
+                    let pIdx = Int(min(pal.count - 1, Int(t * Double(pal.count - 1))))
+                    let p = pal[pIdx]
+                    let mix: Float = 0.30
                     col = (col.r * (1 - mix) + p.r * mix,
                            col.g * (1 - mix) + p.g * mix,
                            col.b * (1 - mix) + p.b * mix)
@@ -196,10 +196,10 @@ struct RMBitmap {
     private static func cgFromBuffer(_ buf: [UInt8], size: Int) -> CGImage? {
         let cs = CGColorSpaceCreateDeviceRGB()
         let data = Data(buf)
-        guard let provider = CGDataProvider(data: data) else { return nil }
+        guard let provider = CGDataProvider(data: data as CFData) else { return nil }
         return CGImage(width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32,
                        bytesPerRow: size * 4, space: cs,
-                       bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
                        provider: provider, decode: nil, shouldInterpolate: true,
                        intent: .defaultIntent)
     }
@@ -212,7 +212,7 @@ struct RMBitmap {
         fmt.preferredRange = .standard
         let rend = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: fmt)
         return rend.image { ctx in
-            ctx.imageContext?.imageInterpolationQuality = .high
+            ctx.cgContext.imageInterpolationQuality = .high
             img.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
         }
     }
@@ -229,7 +229,7 @@ struct RMBitmap {
         guard let out = ctx.makeImage(),
               let prov = out.dataProvider,
               let raw = prov.data as Data? else { return }
-        raw.withUnsafeBytes { p in
+        raw.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
             let b = p.baseAddress!
             for i in 0..<(size * size) {
                 let o = i * 4
