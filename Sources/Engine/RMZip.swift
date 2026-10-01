@@ -93,7 +93,7 @@ enum RMZip {
                 var load = Data()
 
                 if !isDir.boolValue, size > 0 {
-                    let comp = deflate(blob)
+                    let comp = deflateBlob(blob)
                     if comp.count < blob.count {
                         method = 8
                         load = comp
@@ -148,7 +148,7 @@ enum RMZip {
 
     // MARK: - zlib 辅助
 
-    private static func deflate(_ blob: Data) -> Data {
+    private static func deflateBlob(_ blob: Data) -> Data {
         var out = Data(repeating: 0, count: max(blob.count + 256, 1024))
         var filled = 0
         _ = blob.withUnsafeBytes { sb -> Int32 in
