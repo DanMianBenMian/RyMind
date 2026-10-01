@@ -61,14 +61,32 @@ final class LlamaEngine: ObservableObject {
         return "qwen"
     }
 
-    private func template(brand: String, system: String, user: String) -> String {
+    /// 完整多轮对话模板（⚠️ 之前把多轮历史塞进单条 user 文本里，模型会把历史当"一句话说明"
+    /// 去复述/瞎接，这是输出牛头不对马嘴和乱码的主因）。统一走 turns：
+    ///   turns = 之前所有轮次，末尾由调用方补上"当前这次提问"。
+    private func renderChat(brand: String, system: String, turns: [(Bool, String)]) -> String {
         switch brand {
         case "llama":
-            return "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|><|start_of_turn>assistant\n\n"
+            var s = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n"
+            for t in turns {
+                let who = t.0 ? "user" : "assistant"
+                s += "<|start_header_id|>\(who)<|end_header_id|>\n\n\(t.1)<|eot_id|>\n"
+            }
+            return s + "<|start_header_id|>assistant<|end_header_id|>\n\n"
         case "gemma":
-            return "<bos><start_of_turn>system\n\(system)\n<end_of_turn>\n<start_of_turn>user\n\(user)<|end_of_turn>\n<start_of_turn>assistant\n"
-        default:
-            return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
+            var s = "<bos>"
+            for t in turns {
+                let who = t.0 ? "user" : "assistant"
+                s += "<start_of_turn>\(who)\n\(t.1)<end_of_turn>\n"
+            }
+            return s + "<start_of_turn>assistant\n"
+        default:  // qwen / ChatML
+            var s = "<|im_start|>system\n\(system)<|im_end|>\n"
+            for t in turns {
+                let who = t.0 ? "user" : "assistant"
+                s += "<|im_start|>\(who)\n\(t.1)<|im_end|>\n"
+            }
+            return s + "<|im_start|>assistant\n"
         }
     }
 
@@ -221,15 +239,9 @@ final class LlamaEngine: ObservableObject {
         DispatchQueue.main.async { self.isGenerating = true }
 
         let brand = key(of: brandHint)
-        var userPart = ""
-        let hist = Array(history.suffix(6))
-        if !hist.isEmpty {
-            for h in hist { userPart += (h.0 ? "用户：" : "助手：") + h.1 + "\n" }
-            userPart += "最新问题："
-        }
-        userPart += prompt
-
-        let text = template(brand: brand, system: system, user: userPart)
+        // 历史 + 本次提问，整体拼成规范多轮对话再一次性 tokenize
+        let turns = Array(history.suffix(6)) + [(true, prompt)]
+        let text = renderChat(brand: brand, system: system, turns: turns)
         let cap = max(Int(nCtx), 1)
         var pTokens = [llama_token](repeating: 0, count: cap)
 
@@ -279,10 +291,12 @@ final class LlamaEngine: ObservableObject {
             let next = pickToken(lp, nVocab: nVocab, temp: sample.temperature,
                                  topP: sample.topP, penalty: sample.repeatPenalty,
                                  recent: recent)
-            if next == llama_vocab_eos(v) { break }
+            // 标准终止判定：EOS 或任何 EOG（含 <|im_end|> / <|eot_id|> / <end_of_turn|>）
+            if next == llama_vocab_eos(v) || llama_vocab_is_eog(v, next) { break }
 
             var buf = [CChar](repeating: 0, count: 512)
-            let n = Int(llama_token_to_piece(v, next, &buf, Int32(buf.count), 0, true))
+            // 最后一个参数 special=false：别把特殊标记本身吐出来，否则输出里就是一串 <|im_end|>
+            let n = Int(llama_token_to_piece(v, next, &buf, Int32(buf.count), 0, false))
             gen.append(next)
             if n > 0 {
                 let bytes = buf.prefix(n).map { UInt8(bitPattern: $0) }
@@ -327,21 +341,54 @@ final class LlamaEngine: ObservableObject {
 // MARK: - 采样参数（高级页读写）
 
 struct RMSample {
-    var temperature: Float = 0.0    // 0 = 贪心（小模型最稳）
-    var repeatPenalty: Float = 0.0  // 0 = 不惩罚，0.15 左右自然
-    var topP: Float = 0.9
-    var maxTokens: Int = 256
+    /// 默认值 = 高级页的「发挥」预设（用户要求本次测试就按这个）
+    var temperature: Float = 1.0    // 越大越发散
+    var repeatPenalty: Float = 0.20 // 压复读
+    var topP: Float = 0.95
+    var maxTokens: Int = 768
+}
+
+/// 高级页三个预设（稳 / 均衡 / 发挥）
+enum RMPreset {
+    case steady, balanced, creative
+
+    var sample: RMSample {
+        switch self {
+        case .steady:    return RMSample(temperature: 0.0, repeatPenalty: 0.0,  topP: 0.9,  maxTokens: 256)
+        case .balanced:  return RMSample(temperature: 0.6, repeatPenalty: 0.10, topP: 0.9,  maxTokens: 512)
+        case .creative:  return RMSample(temperature: 1.0, repeatPenalty: 0.20, topP: 0.95, maxTokens: 768)
+        }
+    }
+
+    var name: String {
+        switch self {
+        case .steady: return "稳"
+        case .balanced: return "均衡"
+        case .creative: return "发挥"
+        }
+    }
+
+    var desc: String {
+        switch self {
+        case .steady:    return "温度 0 · 不惩罚 · 256 token"
+        case .balanced:  return "温度 0.6 · 轻度惩罚 · 512 token"
+        case .creative:  return "温度 1.0 · 强惩罚 · 768 token"
+        }
+    }
+
+    static var all: [RMPreset] { [.steady, .balanced, .creative] }
 }
 
 enum RMSampleStore {
     private static let key = "rymind.sampling"
 
+    /// 没存过就给「发挥」预设（用户定的默认）
     static func load() -> RMSample {
         guard let d = UserDefaults.standard.dictionary(forKey: key),
               let t = d["temp"] as? Double,
               let p = d["pen"] as? Double,
               let tp = d["topp"] as? Double,
-              let mt = d["maxTokens"] as? Int else { return RMSample() }
+              let mt = d["maxTokens"] as? Int else { return RMPreset.creative.sample }
         return RMSample(temperature: Float(t), repeatPenalty: Float(p), topP: Float(tp), maxTokens: mt)
     }
 
