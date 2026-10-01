@@ -198,7 +198,7 @@ struct FilesView: View {
 
     private func fileRow(_ item: RMFileEntry) -> some View {
         let picked = selected.contains(item.name)
-        HStack(spacing: 10) {
+        let base = HStack(spacing: 10) {
             if multiMode {
                 Image(systemName: picked ? "checkmark.circle.fill" : "circle")
                     .font(.system(size: 13))
@@ -255,6 +255,7 @@ struct FilesView: View {
             }
             .tint(RMTheme.warn)
         }
+        return base
     }
 
 }
