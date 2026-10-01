@@ -434,11 +434,11 @@ final class LlamaEngine: ObservableObject {
 // MARK: - 采样参数（高级页读写）
 
 struct RMSample {
-    /// 默认值 = 高级页的「发挥」预设（用户要求本次测试就按这个）
-    var temperature: Float = 1.0    // 越大越发散
-    var repeatPenalty: Float = 0.20 // 压复读
+    /// 出厂默认 = 「稳」：小模型贪心解码最不容易胡说。想发挥到「高级」页切预设。
+    var temperature: Float = 0.0    // 0 = 贪心（永远选最可能的词）
+    var repeatPenalty: Float = 0.0  // 压复读；小模型上加惩罚反而容易串味，默认不开
     var topP: Float = 0.95
-    var maxTokens: Int = 768
+    var maxTokens: Int = 512
 }
 
 /// 高级页三个预设（稳 / 均衡 / 发挥）
@@ -475,13 +475,13 @@ enum RMPreset {
 enum RMSampleStore {
     private static let key = "rymind.sampling"
 
-    /// 没存过就给「发挥」预设（用户定的默认）
+    /// 没存过就给「稳」预设（出厂默认最稳，别一上来温度拉满让小模型瞎跑）
     static func load() -> RMSample {
         guard let d = UserDefaults.standard.dictionary(forKey: key),
               let t = d["temp"] as? Double,
               let p = d["pen"] as? Double,
               let tp = d["topp"] as? Double,
-              let mt = d["maxTokens"] as? Int else { return RMPreset.creative.sample }
+              let mt = d["maxTokens"] as? Int else { return RMPreset.steady.sample }
         return RMSample(temperature: Float(t), repeatPenalty: Float(p), topP: Float(tp), maxTokens: mt)
     }
 
