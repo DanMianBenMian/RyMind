@@ -68,11 +68,37 @@ final class FileStore: ObservableObject {
         refresh()
     }
 
+    /// 上一级（一次只退一层）
     func up() {
         if path == "/" { return }
         let p = (path as NSString).deletingLastPathComponent
         path = p == "/" ? "/" : p
         refresh()
+    }
+
+    /// 直接回根目录
+    func goRoot() {
+        path = "/"
+        refresh()
+    }
+
+    /// 往下钻（path 可以是 "/chat-abcd" 这种完整路径）
+    func enterPath(_ p: String) {
+        let clean = p.trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty else { return }
+        path = clean.hasPrefix("/") ? clean : "/" + clean
+        refresh()
+    }
+
+    /// Workspaces 下所有子目录的 unix 路径（移动/复制的目标列表）
+    var dirTreePaths: [String] {
+        var out: [String] = []
+        guard let e = enumerator(at: rootURL, includingPropertiesForKeys: [.isDirectoryKey]) else { return [] }
+        for case let url as URL in e where (try? url.resourceValues(forKey: .isDirectoryKey))?.isDirectory == true {
+            let rel = url.path.replacingOccurrences(of: rootURL.path, with: "")
+            out.append(rel.isEmpty ? "/" : rel)
+        }
+        return out.sorted()
     }
 
     // MARK: - 基本操作
@@ -202,6 +228,83 @@ final class FileStore: ObservableObject {
         try? data.write(to: target)
         message = "已写入 \(n)"
         refresh()
+    }
+
+    /// 从某个偏移开始写字节（只覆盖这一段，其它字节原样留着）
+    /// - offset: 字节偏移，超出文件长度就补 0 撑到那个位置
+    func writeBytes(name: String, offset: Int, bytes: [UInt8]) -> Bool {
+        let n = clean(name)
+        guard !n.isEmpty, !bytes.isEmpty, offset >= 0 else { return false }
+        let f = url(for: path).appendingPathComponent(n)
+        var data = (try? Data(contentsOf: f)) ?? Data()
+        if offset + bytes.count > data.count {
+            data.append(Data(count: offset + bytes.count - data.count))
+        }
+        data.replaceSubrange(offset..<(offset + bytes.count), with: bytes)
+        do {
+            try data.write(to: f)
+            message = "已从偏移 \(offset) 写入 \(bytes.count) 字节"
+            refresh()
+            return true
+        } catch {
+            message = "写入失败：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Hex 文本整体替换（文本框里粘一整段 hex 用）
+    func writeHexText(name: String, hexText: String) -> Bool {
+        let n = clean(name)
+        guard !n.isEmpty else { return false }
+        var bytes = [UInt8]()
+        bytes.reserveCapacity(hexText.count / 3)
+        var pending = ""
+        for ch in hexText {
+            if ch == " " || ch == "\n" || ch == "\t" || ch == "," { continue }
+            pending.append(ch)
+            if pending.count == 2 {
+                if let b = UInt8(pending, radix: 16) { bytes.append(b) }
+                pending = ""
+            }
+        }
+        guard !bytes.isEmpty else { message = "没解析出字节"; return false }
+        let f = url(for: path).appendingPathComponent(n)
+        do {
+            try Data(bytes).write(to: f)
+            message = "已用 \(bytes.count) 字节替换 \(n)"
+            refresh()
+            return true
+        } catch {
+            message = "写入失败：\(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// 把二进制读成 hex 文本（每行 16 字节，带偏移和 ASCII 栏）
+    func hexText(name: String, from: Int = 0, count: Int = 4096) -> (text: String, total: Int, loaded: Int) {
+        guard let d = readData(name: name) else { return ("", 0, 0) }
+        let total = d.count
+        let start = max(0, min(from, total))
+        let n = max(0, min(count, total - start))
+        if n == 0 { return ("（空文件）", total, 0) }
+        var s = ""
+        s.reserveCapacity(n * 4)
+        var i = start
+        while i < start + n {
+            let end = min(i + 16, start + n)
+            var hex = ""
+            var ascii = ""
+            hex.reserveCapacity(48)
+            ascii.reserveCapacity(17)
+            for j in i..<end {
+                let c = d[j]
+                hex += String(format: "%02X ", c)
+                ascii += (c >= 32 && c < 127) ? String(UnicodeScalar(c)) : "."
+            }
+            s += String(format: "%08X  %@  |%@|\n", i, hex, ascii)
+            i = end
+        }
+        return (s, total, n)
     }
 
     // MARK: - 打包
