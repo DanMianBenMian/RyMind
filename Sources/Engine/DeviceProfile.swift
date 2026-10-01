@@ -66,6 +66,15 @@ final class DeviceProfile: ObservableObject {
     /// 引擎上报的当前实际占用（GB）
     @Published var usedGB: Double = 0
 
+    /// Metal（GPU）总开关。手动关掉后置 0 层，推理走纯 CPU——内存和发热都降，但会慢。
+    @Published var metalEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: "rymind.metalEnabled") }
+        set { UserDefaults.standard.set(newValue, forKey: "rymind.metalEnabled") }
+    }
+
+    /// 实际送进 llama 的 GPU 层数（关 Metal 就是 0）
+    var effectiveGpuLayers: Int { metalEnabled ? tier.gpuLayers : 0 }
+
     /// 进程实际物理内存占用（GB）
     var footprintGB: Double {
         var info = mach_task_basic_info()
