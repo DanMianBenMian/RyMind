@@ -22,6 +22,10 @@ struct RyMindApp: App {
                 .environmentObject(device)
                 .environmentObject(ModelStore.shared)
                 .environmentObject(ModelDownloader.shared)
+                .environmentObject(SessionStore.shared)
+                .environmentObject(LlamaEngine.shared)
+                .environmentObject(SkillStore.shared)
+                .environmentObject(FileStore.shared)
                 .preferredColorScheme(.dark)
         }
     }
