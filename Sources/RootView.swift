@@ -15,7 +15,8 @@ enum RMTab: String, CaseIterable, Identifiable {
         case .image:    return "photo"
         case .perf:     return "gauge"
         case .library:  return "folder"
-        case .advanced: return "slider.horizontal.adjustable"
+        // 别用 slider.horizontal.adjustable（iOS 17+ 才在），滑条缺图标在老系统上是空白
+        case .advanced: return "sliders.horizontal"
         }
     }
 }
