@@ -2,6 +2,8 @@ import SwiftUI
 
 /// 「高级」页：温度 / 重复惩罚 / 随机性(top-p) / 输出长度
 struct AdvancedView: View {
+    @EnvironmentObject private var device: DeviceProfile
+
     @State private var temp: Double
     @State private var pen: Double
     @State private var topP: Double
@@ -49,6 +51,7 @@ struct AdvancedView: View {
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $temp, in: 0...1, step: 0.05)
                     .tint(RMTheme.accent)
+                    .onChange(of: temp) { _ in persist() }
                 Text(temp == 0
                      ? "0.00 · 贪心解码：永远选最可能的词，最稳、最不跑题"
                      : String(format: "%.2f · 有随机性，%.2f 以上小模型开始容易胡说", temp, temp))
@@ -62,6 +65,7 @@ struct AdvancedView: View {
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $pen, in: 0...0.5, step: 0.01)
                     .tint(RMTheme.accent)
+                    .onChange(of: pen) { _ in persist() }
                 Text(String(format: "%.2f", pen))
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
@@ -73,6 +77,7 @@ struct AdvancedView: View {
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $topP, in: 0.1...1, step: 0.05)
                     .tint(RMTheme.accent)
+                    .onChange(of: topP) { _ in persist() }
                 Text(String(format: "%.2f", topP))
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
@@ -84,21 +89,24 @@ struct AdvancedView: View {
                     .foregroundStyle(RMTheme.accent)
                 Slider(value: $maxTok, in: 64...1024, step: 32)
                     .tint(RMTheme.accent)
+                    .onChange(of: maxTok) { _ in persist() }
                 Text("\(Int(maxTok)) token（约 \(Int(maxTok) * 2) 个汉字）")
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.textSub)
             }
 
-            Section("预设") {
-                Button {
-                    apply(0, 0.0, 0.9, 256)
-                } label: { presetRow("稳", "温度 0 · 不惩罚 · 256 token", current: isPreset(0, 0.0, 0.9, 256)) }
-                Button {
-                    apply(0.6, 0.10, 0.9, 512)
-                } label: { presetRow("均衡", "温度 0.6 · 轻度惩罚 · 512 token", current: isPreset(0.6, 0.10, 0.9, 512)) }
-                Button {
-                    apply(1.0, 0.20, 0.95, 768)
-                } label: { presetRow("发挥", "温度 1.0 · 强惩罚 · 768 token", current: isPreset(1.0, 0.20, 0.95, 768)) }
+            Section("Metal / GPU 加速（关掉就走纯 CPU，省电省内存但会慢）") {
+                Toggle("Metal 加速", isOn: $device.metalEnabled)
+                    .tint(RMTheme.accent)
+                Text("关掉之后 llama 的 GPU 层数变 0，权重全跑 CPU。下次发消息立刻生效，不用重启。当前档位最多可上 \(device.tier.gpuLayers) 层。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(RMTheme.textSub)
+            }
+
+            Section("预设（点了会同时把下面的滑条改掉）") {
+                ForEach(RMPreset.all, id: \.raw) { p in
+                    Button { applyPreset(p) } label: { presetRow(p.name, p.desc, current: isPreset(p)) }
+                }
             }
 
             Section("当前生效") {
@@ -113,12 +121,13 @@ struct AdvancedView: View {
         .navigationTitle("高级")
     }
 
-    private func isPreset(_ t: Double, _ p: Double, _ tp: Double, _ m: Int) -> Bool {
+    private func isPreset(_ p: RMPreset) -> Bool {
         let s = RMSampleStore.load()
-        return abs(Double(s.temperature) - t) < 0.001
-            && abs(Double(s.repeatPenalty) - p) < 0.001
-            && abs(Double(s.topP) - tp) < 0.001
-            && Double(s.maxTokens) == Double(m)
+        let t = p.sample
+        return abs(Double(s.temperature) - Double(t.temperature)) < 0.001
+            && abs(Double(s.repeatPenalty) - Double(t.repeatPenalty)) < 0.001
+            && abs(Double(s.topP) - Double(t.topP)) < 0.001
+            && Double(s.maxTokens) == Double(t.maxTokens)
     }
 
     private func presetRow(_ name: String, _ desc: String, current: Bool) -> some View {
@@ -132,8 +141,22 @@ struct AdvancedView: View {
         }
     }
 
-    private func apply(_ t: Double, _ p: Double, _ tp: Double, _ m: Int) {
-        RMSampleStore.save(RMSample(temperature: Float(t), repeatPenalty: Float(p), topP: Float(tp), maxTokens: Int(m)))
-        temp = t; pen = p; topP = tp; maxTok = Double(m)
+    private func applyPreset(_ p: RMPreset) {
+        let t = p.sample
+        RMSampleStore.save(RMSample(temperature: t.temperature,
+                                    repeatPenalty: t.repeatPenalty,
+                                    topP: t.topP,
+                                    maxTokens: t.maxTokens))
+        temp = Double(t.temperature); pen = Double(t.repeatPenalty)
+        topP = Double(t.topP); maxTok = Double(t.maxTokens)
+    }
+
+    // ⚠️ 之前四个滑条只改了 @State，**从来没写回 RMSampleStore**，
+    // 所以每次进页面都是上次的预设值 —— 这就是"调了参数还是用预设"的 bug。现在一改就存。
+    private func persist() {
+        RMSampleStore.save(RMSample(temperature: Float(temp),
+                                    repeatPenalty: Float(pen),
+                                    topP: Float(topP),
+                                    maxTokens: Int(maxTok)))
     }
 }
