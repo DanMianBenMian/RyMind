@@ -150,6 +150,7 @@ enum RMZip {
 
     private static func deflateBlob(_ blob: Data) -> Data {
         var out = Data(repeating: 0, count: max(blob.count + 256, 1024))
+        let cap = out.count
         var filled = 0
         _ = blob.withUnsafeBytes { sb -> Int32 in
             out.withUnsafeMutableBytes { db -> Int32 in
@@ -157,8 +158,8 @@ enum RMZip {
                 var st = z_stream()
                 st.next_in = UnsafeMutableRawPointer(mutating: sb.baseAddress!).bindMemory(to: Bytef.self, capacity: sb.count)
                 st.avail_in = uInt(blob.count)
-                st.next_out = db.baseAddress!.bindMemory(to: Bytef.self, capacity: db.count)
-                st.avail_out = uInt(out.count)
+                st.next_out = db.baseAddress!.bindMemory(to: Bytef.self, capacity: cap)
+                st.avail_out = uInt(cap)
                 deflateInit2_(&st, 6, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
                 let r = deflate(&st, Z_FINISH)
                 filled = Int(st.total_out)
@@ -171,14 +172,15 @@ enum RMZip {
 
     private static func rawInflate(_ src: [UInt8]) throws -> Data {
         var out = [UInt8](repeating: 0, count: max(src.count * 4 + 1024, 4096))
+        let cap = out.count
         var filled = 0
         let rc = out.withUnsafeMutableBytes { db -> Int32 in
             src.withUnsafeBytes { sb -> Int32 in
                 var st = z_stream()
                 st.next_in = UnsafeMutableRawPointer(mutating: sb.baseAddress!).bindMemory(to: Bytef.self, capacity: sb.count)
                 st.avail_in = uInt(src.count)
-                st.next_out = db.baseAddress!.bindMemory(to: Bytef.self, capacity: db.count)
-                st.avail_out = uInt(out.count)
+                st.next_out = db.baseAddress!.bindMemory(to: Bytef.self, capacity: cap)
+                st.avail_out = uInt(cap)
                 inflateInit2_(&st, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
                 let r = inflate(&st, Z_FINISH)
                 filled = Int(st.total_out)
