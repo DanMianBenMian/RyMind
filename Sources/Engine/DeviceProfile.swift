@@ -28,6 +28,18 @@ final class DeviceProfile: ObservableObject {
             }
         }
 
+        /// Max 模式下实际送进模型的上下文（比默认大一档，用来"高强度思考"：
+        /// 装得下更长历史和更长的推理链）。受内存预算硬顶，不会无限涨。
+        var maxCtxTokens: Int {
+            switch self {
+            case .tiny:   return 8192
+            case .small:  return 16384
+            case .mid:    return 32768
+            case .large:  return 49152
+            case .xlarge: return 65536
+            }
+        }
+
         /// KV cache 量化（q8_0）省内存，仅超大档可关闭
         var kvQuant: Bool { self != .xlarge }
 
