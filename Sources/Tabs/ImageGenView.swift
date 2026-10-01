@@ -269,8 +269,10 @@ struct ImagePreviewSheet: View {
                     Image(uiImage: img).resizable().scaledToFit().padding(12)
                 }
                 HStack(spacing: 14) {
-                    ShareLink(item: ImagePreviewSheet.item(img)) {
-                        Label("分享", systemImage: "square.and.arrow.up")
+                    if let png = img.pngData() {
+                        ShareLink(item: png) {
+                            Label("分享", systemImage: "square.and.arrow.up")
+                        }
                     }
                     Button {
                         if let d = img.pngData() {
