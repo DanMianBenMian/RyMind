@@ -212,7 +212,7 @@ struct RMBitmap {
         fmt.preferredRange = .standard
         let rend = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: fmt)
         return rend.image { ctx in
-            ctx.cgContext.imageInterpolationQuality = .high
+            CGContextSetInterpolationQuality(ctx.cgContext, CGInterpolationQuality.high)
             img.draw(in: CGRect(x: 0, y: 0, width: size, height: size))
         }
     }
@@ -230,12 +230,12 @@ struct RMBitmap {
               let prov = out.dataProvider,
               let raw = prov.data as Data? else { return }
         raw.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            let b = p.baseAddress!
+            guard let b = p.baseAddress else { return }
             for i in 0..<(size * size) {
                 let o = i * 4
-                let r = Float(b[o]) / 255.0
-                let g = Float(b[o + 1]) / 255.0
-                let bl = Float(b[o + 2]) / 255.0
+                let r = Float(b.load(fromByteOffset: o, as: UInt8.self)) / 255.0
+                let g = Float(b.load(fromByteOffset: o + 1, as: UInt8.self)) / 255.0
+                let bl = Float(b.load(fromByteOffset: o + 2, as: UInt8.self)) / 255.0
                 rgb[i] = (r, g, bl)
                 lum[i] = 0.299 * r + 0.587 * g + 0.114 * bl
             }
