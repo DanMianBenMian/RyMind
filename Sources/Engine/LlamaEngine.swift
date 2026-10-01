@@ -442,8 +442,10 @@ struct RMSample {
 }
 
 /// 高级页三个预设（稳 / 均衡 / 发挥）
-enum RMPreset {
+enum RMPreset: String, Identifiable, Hashable {
     case steady, balanced, creative
+
+    var id: String { rawValue }
 
     var sample: RMSample {
         switch self {
