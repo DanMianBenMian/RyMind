@@ -2,6 +2,29 @@ import Foundation
 import UIKit
 import CoreGraphics
 
+/// ⚠️ 出图循环里**绝不能**出现裸 `Int(someDouble)` / `UInt64(someInt)`：
+/// Swift 对「整数↔整数转换值域不够」「浮点转整数是 NaN/Inf/超范围」都是**直接 trap**（EXC_BREAKPOINT/SIGTRAP），
+/// 后台线程一 trap 整个 App 就闪退 —— RyMind v0.4.5 的生图崩溃就是 `UInt64(负坐标)` 这一行造成的。
+/// 下面两个函数把所有这些情况钉到边界上，永不 trap。
+
+/// Double → Int：NaN→0，Inf→Int.max/min，超范围→边界
+fileprivate func rmAsInt(_ d: Double) -> Int {
+    if d.isNaN { return 0 }
+    if d.isInfinite { return d > 0 ? Int.max : Int.min }
+    if d >= Double(Int.max) { return Int.max }
+    if d <= Double(Int.min) { return Int.min }
+    return Int(d)
+}
+
+/// Double → 0…255 字节
+fileprivate func rmByte(_ d: Double) -> UInt8 {
+    if d.isNaN { return 0 }
+    if d.isInfinite { return d > 0 ? 255 : 0 }
+    if d <= 0 { return 0 }
+    if d >= 255 { return 255 }
+    return UInt8(d)
+}
+
 /// 本地位图生成器（100% 离线、不用联网下载权重）。
 ///
 /// 两条路：
@@ -9,8 +32,7 @@ import CoreGraphics
 ///    相当于"在参考图基础上改进"，而不是凭空画个圆。
 ///  · 没参考图 → 程序化生成：fBm 分形噪声 + 调色板 + 构图（星云 / 山脊 / 波纹 / 网格）。
 ///
-/// 先算 180×180 的小图再放大到目标尺寸（放大用高质量插值），这样在 iPad 上也是秒级出图。
-struct RMBitmap {
+/// 先算 180×180 的小图再放大到目标尺寸（放大用高质量插值），这样在 iPad 上也是秒级出图。struct RMBitmap {
 
     typealias RGB = (r: Float, g: Float, b: Float)
 
@@ -100,7 +122,8 @@ struct RMBitmap {
 
                 f1 = min(1.0, max(0.0, f1))
                 f2 = min(1.0, max(0.0, f2))
-                var t = min(1.0, max(0.0, shape * 0.75 + f2 * 0.35))
+                let shapePart = shape * 0.75 + f2 * 0.35
+                let t = min(1.0, max(0.0, shapePart))
 
                 var col: RGB
                 if hasRef {
@@ -108,29 +131,32 @@ struct RMBitmap {
                     let base = refRGB[i]
                     let lum0: Float = refLum[i] >= 0 ? refLum[i] : Float(t)
                     let detail: Double = 0.55 + f1 * 0.5 - 0.25
-                    let bright: Float = Float(min(1.4, max(0.15, Double(lum0) * detail + (t - 0.5) * 0.35)))
+                    let rawBright = Double(lum0) * detail + (t - 0.5) * 0.35
+                    let bright: Float = Float(min(1.4, max(0.15, rawBright)))
                     col = (base.r * bright, base.g * bright, base.b * bright)
                     // 叠一点调色板的环境色，免得看过去还是原图
-                    let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
+                    let pIdx = min(pal.count - 1, rmAsInt(t * Double(pal.count - 1)))
                     let p = pal[pIdx]
                     let mix: Float = 0.30
-                    col = (col.r * (1 - mix) + p.r * mix,
-                           col.g * (1 - mix) + p.g * mix,
-                           col.b * (1 - mix) + p.b * mix)
+                    let keep = 1 - mix
+                    col = (col.r * keep + p.r * mix,
+                           col.g * keep + p.g * mix,
+                           col.b * keep + p.b * mix)
                 } else {
-                    let pIdx = min(pal.count - 1, asInt(t * Double(pal.count - 1)))
+                    let pIdx = min(pal.count - 1, rmAsInt(t * Double(pal.count - 1)))
                     let p0 = pal[pIdx]
                     let p1 = pal[min(pal.count - 1, pIdx + 1)]
                     let frac = Double(t * Double(pal.count - 1)) - Double(pIdx)
-                    col = (Float(lerp(Double(p0.r), Double(p1.r), frac)),
-                           Float(lerp(Double(p0.g), Double(p1.g), frac)),
-                           Float(lerp(Double(p0.b), Double(p1.b), frac)))
+                    let lr = RMBitmap.lerp(Double(p0.r), Double(p1.r), frac)
+                    let lg = RMBitmap.lerp(Double(p0.g), Double(p1.g), frac)
+                    let lb = RMBitmap.lerp(Double(p0.b), Double(p1.b), frac)
+                    col = (Float(lr), Float(lg), Float(lb))
                 }
 
                 let o = i * 4
-                buf[o]     = byte(col.r * 255)
-                buf[o + 1] = byte(col.g * 255)
-                buf[o + 2] = byte(col.b * 255)
+                buf[o]     = rmByte(Double(col.r) * 255.0)
+                buf[o + 1] = rmByte(Double(col.g) * 255.0)
+                buf[o + 2] = rmByte(Double(col.b) * 255.0)
                 buf[o + 3] = 255
             }
         }
@@ -210,31 +236,6 @@ struct RMBitmap {
         else { return nil }
         return ctx.makeImage()
     }
-
-    // MARK: - 永不 trap 的数值转换（出图循环专用）
-
-/// ⚠️ 出图循环里**绝不能**出现裸 `Int(someDouble)` / `UInt64(someInt)`：
-/// Swift 对「整数↔整数转换值域不够」「浮点转整数是 NaN/Inf/超范围」都是**直接 trap**（EXC_BREAKPOINT/SIGTRAP），
-/// 后台线程一 trap 整个 App 就闪退 —— RyMind v0.4.5 的生图崩溃就是 `UInt64(负坐标)` 这一行造成的。
-/// 下面两个函数把所有这些情况钉到边界上，永不 trap。
-
-/// Double → Int：NaN→0，Inf→Int.max/min，超范围→边界
-fileprivate func rmAsInt(_ d: Double) -> Int {
-    if d.isNaN { return 0 }
-    if d.isInfinite { return d > 0 ? Int.max : Int.min }
-    if d >= Double(Int.max) { return Int.max }
-    if d <= Double(Int.min) { return Int.min }
-    return Int(d)
-}
-
-/// Double → 0…255 字节
-fileprivate func rmByte(_ d: Double) -> UInt8 {
-    if d.isNaN { return 0 }
-    if d.isInfinite { return d > 0 ? 255 : 0 }
-    if d <= 0 { return 0 }
-    if d >= 255 { return 255 }
-    return UInt8(d)
-}
 
 /// 小图放大到目标尺寸。
     /// ⚠️⚠️ 绝对不要用 `UIGraphicsImageRenderer`：它不是线程安全的，
