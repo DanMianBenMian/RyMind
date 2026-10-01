@@ -228,6 +228,22 @@ final class FileStore: ObservableObject {
         try? Data(contentsOf: url(for: path).appendingPathComponent(name))
     }
 
+    /// 按 unix 绝对路径读内容（对话页从文件库选文件后用，不受当前 path 影响）
+    func readAt(_ unixPath: String) -> Data? {
+        try? Data(contentsOf: url(for: unixPath))
+    }
+
+    /// 在某个 unix 目录下建一个空文件（文件页「新建文件」用）
+    func createFile(at unixPath: String, name: String, text: String = "") {
+        let n = clean(name)
+        guard !n.isEmpty else { return }
+        try? fm.createDirectory(at: url(for: unixPath), withIntermediateDirectories: true)
+        let f = url(for: unixPath).appendingPathComponent(n)
+        guard !fm.fileExists(atPath: f.path) else { message = "\(n) 已存在"; return }
+        try? text.write(to: f, atomically: true, encoding: .utf8)
+        message = "已新建 \(n)"
+    }
+
     func writeData(name: String, data: Data) {
         let n = clean(name)
         guard !n.isEmpty else { return }
