@@ -47,12 +47,17 @@ struct RMBitmap {
         // 参考图取色底子
         var refLum = [Float](repeating: -1, count: small * small)
         var refRGB = [RGB](repeating: (0, 0, 0), count: small * small)
-        if let img = img, let cg = img.cgImage {
-            drawReference(cg, into: &refLum, &refRGB, size: small)
+        var sampled = false
+        if let img = img {
+            // 相册来的图有时拿不到 cgImage，退化一次 pngData 再取，取不到就当没参考图
+            var src = img.cgImage
+            if src == nil, let re = UIImage(data: img.pngData() ?? Data()) { src = re.cgImage }
+            if let cg = src, drawReference(cg, into: &refLum, &refRGB, size: small) { sampled = true }
         }
 
         let pal = palettes[paletteName] ?? palettes["青蓝"]!
-        let hasRef = img != nil
+        // 采样成功才算 img2img；采样失败就老老实实程序化生成，免得画出一团黑
+        let hasRef = sampled
 
         var s = seed == 0 ? 0x2545F4914F6CDD1D : seed
         let nX = Double(small)
@@ -217,28 +222,31 @@ struct RMBitmap {
         }
     }
 
-    /// 把参考图缩到 small×small，取每点的亮度和颜色
+    /// 把参考图缩到 small×small，取每点的亮度和颜色。
+    /// ⚠️ 别用 `out.dataProvider.data as Data?`——Swift 桥接经常拿到 nil，参考图就白选了。
+    /// 这里直接往一块自己申请的 buffer 上画，画完自己读字节，稳。
     private static func drawReference(_ cg: CGImage, into lum: inout [Float],
-                                      _ rgb: inout [RGB], size: Int) {
-        let cs = CGColorSpaceCreateDeviceRGB()
-        guard let ctx = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8,
-                                  bytesPerRow: size * 4, space: cs,
-                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-        else { return }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
-        guard let out = ctx.makeImage(),
-              let prov = out.dataProvider,
-              let raw = prov.data as Data? else { return }
-        raw.withUnsafeBytes { (p: UnsafeRawBufferPointer) in
-            guard let b = p.baseAddress else { return }
-            for i in 0..<(size * size) {
-                let o = i * 4
-                let r = Float(b.load(fromByteOffset: o, as: UInt8.self)) / 255.0
-                let g = Float(b.load(fromByteOffset: o + 1, as: UInt8.self)) / 255.0
-                let bl = Float(b.load(fromByteOffset: o + 2, as: UInt8.self)) / 255.0
-                rgb[i] = (r, g, bl)
-                lum[i] = 0.299 * r + 0.587 * g + 0.114 * bl
-            }
+                                      _ rgb: inout [RGB], size: Int) -> Bool {
+        let n = size * size
+        var buf = [UInt8](repeating: 0, count: n * 4)
+        let ok = buf.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
+            guard let base = ptr.baseAddress else { return false }
+            guard let ctx = CGContext(data: base, width: size, height: size, bitsPerComponent: 8,
+                                      bytesPerRow: size * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+            else { return false }
+            ctx.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+            return true
         }
+        guard ok else { return false }
+        for i in 0..<n {
+            let o = i * 4
+            let r = Float(buf[o]) / 255.0
+            let g = Float(buf[o + 1]) / 255.0
+            let b = Float(buf[o + 2]) / 255.0
+            rgb[i] = (r, g, b)
+            lum[i] = 0.299 * r + 0.587 * g + 0.114 * b
+        }
+        return true
     }
 }
