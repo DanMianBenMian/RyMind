@@ -201,7 +201,7 @@ struct RMBitmap {
         defer { free(mem) }
         guard let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
                                   bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
-                                  bitmapInfo: CGImageAlphaInfo.noneLast.rawValue)
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
         else { return nil }
         return ctx.makeImage()
     }
@@ -215,11 +215,12 @@ struct RMBitmap {
         let bytes = size * 4
         guard let mem = malloc(bytes) else { return nil }
         defer { free(mem) }
-        let ok = mem.withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
+        let bytes = size * 4
+        let ok = mem.bindMemory(to: UInt8.self, capacity: bytes).withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
             guard let base = ptr.baseAddress else { return false }
             guard let ctx = CGContext(data: base, width: size, height: size, bitsPerComponent: 8,
                                       bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.noneLast.rawValue)
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
             else { return false }
             ctx.interpolationQuality = .high
             ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
@@ -227,7 +228,7 @@ struct RMBitmap {
         }
         guard ok, let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
                                       bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.noneLast.rawValue),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let big = ctx.makeImage() else { return nil }
         return UIImage(cgImage: big)
     }
