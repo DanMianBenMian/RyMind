@@ -215,22 +215,13 @@ struct RMBitmap {
         let bytes = size * 4
         guard let mem = malloc(bytes) else { return nil }
         defer { free(mem) }
-        let bytes = size * 4
-        let ok = mem.bindMemory(to: UInt8.self, capacity: bytes).withUnsafeMutableBytes { (ptr: UnsafeMutableRawBufferPointer) -> Bool in
-            guard let base = ptr.baseAddress else { return false }
-            guard let ctx = CGContext(data: base, width: size, height: size, bitsPerComponent: 8,
-                                      bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
-            else { return false }
-            ctx.interpolationQuality = .high
-            ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
-            return true
-        }
-        guard ok, let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
-                                      bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
-              let big = ctx.makeImage() else { return nil }
-        return UIImage(cgImage: big)
+        guard let ctx = CGContext(data: mem, width: size, height: size, bitsPerComponent: 8,
+                                  bytesPerRow: bytes, space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(src, in: CGRect(x: 0, y: 0, width: size, height: size))
+        return ctx.makeImage().flatMap { UIImage(cgImage: $0) }
     }
 
     /// 把参考图缩到 small×small，取每点的亮度和颜色。
