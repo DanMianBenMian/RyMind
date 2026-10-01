@@ -167,7 +167,7 @@ struct ImageGenView: View {
                                 HStack(spacing: 10) {
                                     ForEach(results) { pic in
                                         Button { previewItem = LoadedImage(img: pic.img) } label: {
-                                            Image(uiImage: img)
+                                            Image(uiImage: pic.img)
                                                 .resizable()
                                                 .scaledToFill()
                                                 .frame(width: 96, height: 96)
