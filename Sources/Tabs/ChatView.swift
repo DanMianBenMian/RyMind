@@ -22,11 +22,13 @@ struct ChatView: View {
 
     init(landscape: Bool) { self.landscape = landscape }
 
-    private var windowK: Double {
-        (maxMode ? 1000.0 : Double(device.tier.ctxTokens)) / 1024.0
-    }
-    private var usedK: Double { Double(engine.ctxUsed) / 1024.0 }
     private var messages: [ChatMessage] { sessions.messages }
+    private var generating: Bool { engine.isGenerating }
+
+    /// 进度条用真实值：实际用掉 / 模型实际上下文；Max 模式另外标存档窗口
+    private var usedK: Double { Double(engine.ctxUsed) / 1024.0 }
+    private var realK: Double { Double(max(engine.ctxTotal, 1)) / 1024.0 }
+    private var savedK: Double { maxMode ? 1000.0 : 0 }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -47,7 +49,7 @@ struct ChatView: View {
                 LazyVStack(spacing: 10) {
                     ForEach(messages) { m in bubble(m) }
                     if messages.isEmpty {
-                        Text("开始一个新话题吧。左下角可以看到所有对话记录。")
+                        Text("开始一个新话题吧。顶部有「新对话」，左下角是全部对话记录。")
                             .font(.system(size: 12))
                             .foregroundStyle(RMTheme.textSub)
                             .padding(.top, 40)
@@ -69,6 +71,11 @@ struct ChatView: View {
                             .foregroundStyle(RMTheme.accent)
                     }
                 }
+                Button { newChat() } label: {
+                    Image(systemName: "square.compose")
+                        .font(.system(size: 13))
+                        .foregroundStyle(RMTheme.accent)
+                }
                 ModelPicker(kind: .llm)
                 Spacer()
                 Button { maxMode.toggle() } label: {
@@ -80,12 +87,24 @@ struct ChatView: View {
                         .background(maxMode ? RMTheme.accent : RMTheme.surface)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 }
-                Text(String(format: "上下文已用 %.1fk / %.0fk", usedK, windowK))
+            }
+
+            // 真实进度：本次已用 / 模型实际窗口
+            ProgressView(value: min(usedK, realK), total: max(realK, 0.001))
+                .tint(RMTheme.accent)
+
+            HStack(spacing: 6) {
+                Text(String(format: "上下文已用 %.1fk / %.0fk", usedK, realK))
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.accent)
+                if maxMode {
+                    Text("· 存档 1000k，本次只喂相关片段")
+                        .font(.system(size: 11))
+                        .foregroundStyle(RMTheme.textSub)
+                }
+                Spacer()
             }
-            ProgressView(value: min(usedK, windowK), total: max(windowK, 1))
-                .tint(RMTheme.accent)
+
             Text(statusLine.isEmpty ? engine.note : statusLine)
                 .font(.system(size: 11))
                 .foregroundStyle(RMTheme.textSub)
@@ -119,7 +138,6 @@ struct ChatView: View {
                     .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
             }
 
-            // 已附加的东西，点一下取消
             if attachedSkillName != nil || attachedImage != nil {
                 Menu {
                     if let s = attachedSkillName { Button("移除 Skill：\(s)") { attachedSkillName = nil } }
@@ -142,13 +160,22 @@ struct ChatView: View {
                 .padding(.vertical, 7)
                 .background(RMTheme.surface)
                 .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+                .disabled(generating)
 
-            Button { send() } label: {
-                Image(systemName: "arrow.up")
+            // 生成中 → 终止键；否则发送键
+            Button {
+                if generating {
+                    engine.stop()
+                    statusLine = "正在终止…"
+                } else {
+                    send()
+                }
+            } label: {
+                Image(systemName: generating ? "stop.fill" : "arrow.up")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(Color(hex: 0x0B1F1B))
+                    .foregroundStyle(generating ? Color(hex: 0x1B1B1D) : Color(hex: 0x0B1F1B))
                     .frame(width: 30, height: 30)
-                    .background(RMTheme.accent)
+                    .background(generating ? RMTheme.danger : RMTheme.accent)
                     .clipShape(Circle())
             }
         }
@@ -157,14 +184,20 @@ struct ChatView: View {
         .background(RMTheme.rail)
     }
 
-    // MARK: - 会话侧栏 / 弹层
+    // MARK: - 会话
+
+    private func newChat() {
+        input = ""
+        statusLine = ""
+        sessions.newSession(title: "新对话")
+    }
 
     private var sessionSidebar: some View {
         VStack(spacing: 0) {
             HStack {
                 Text("对话记录").font(.system(size: 13, weight: .medium)).foregroundStyle(RMTheme.text)
                 Spacer()
-                Button { sessions.makeCurrentSession(title: "新对话") } label: {
+                Button { newChat() } label: {
                     Image(systemName: "square.compose")
                         .font(.system(size: 13))
                         .foregroundStyle(RMTheme.accent)
@@ -189,17 +222,20 @@ struct ChatView: View {
 
     private var sessionSheet: some View {
         NavigationStack {
-            VStack(spacing: 0) {
-                ScrollView {
-                    VStack(spacing: 6) { ForEach(sessions.sessions) { sessionRow($0, compact: true) } }
-                        .padding(12)
+            List {
+                ForEach(sessions.sessions) { s in
+                    sessionRow(s, compact: true)
+                }
+                .onDelete { idx in
+                    for i in idx { sessions.delete(sessions.sessions[i].id) }
                 }
             }
+            .listStyle(.plain)
             .background(RMTheme.rail)
             .navigationTitle("对话记录")
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("新建") { sessions.makeCurrentSession(title: "新对话"); showSessions = false }
+                    Button("新建对话") { newChat(); showSessions = false }
                 }
                 ToolbarItem(placement: .cancellationAction) {
                     Button("关闭") { showSessions = false }
@@ -217,15 +253,14 @@ struct ChatView: View {
                     .foregroundStyle(current ? RMTheme.accent : RMTheme.text)
                     .lineLimit(1)
                 Spacer()
-                if !compact {
-                    Button {
-                        withAnimation { sessions.delete(s.id) }
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.system(size: 11))
-                            .foregroundStyle(RMTheme.textSub)
-                    }
+                Button {
+                    sessions.delete(s.id)
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 11))
+                        .foregroundStyle(RMTheme.danger)
                 }
+                .buttonStyle(.plain)
             }
             Text(s.snippet)
                 .font(.system(size: 11))
@@ -267,11 +302,7 @@ struct ChatView: View {
                     } else {
                         ForEach(skillStore.skills) { sk in
                             Button {
-                                if attachedSkillName == sk.name {
-                                    attachedSkillName = nil
-                                } else {
-                                    attachedSkillName = sk.name
-                                }
+                                attachedSkillName = (attachedSkillName == sk.name) ? nil : sk.name
                             } label: {
                                 HStack {
                                     VStack(alignment: .leading, spacing: 2) {
@@ -330,13 +361,19 @@ struct ChatView: View {
         sessions.append(ChatMessage(id: botId, text: "…", isUser: false))
         statusLine = m.isMoE ? "命中 \(m.name)（MoE：只激活部分专家）" : "命中 \(m.name)，其余模型不加载"
 
-        let brand = m.id.lowercased().contains("llama") ? "llama"
-                  : m.id.lowercased().contains("gemma") ? "gemma" : "qwen"
+        // 多轮历史（去掉刚加的占位回答）
+        var history: [(Bool, String)] = []
+        for msg in messages.dropLast() { history.append((msg.isUser, msg.text)) }
+
+        // Max 模式：存档窗口拉到 1000k、只筛相关片段喂进去；平时用模型实际窗口
+        let ctxTokens = maxMode
+            ? min(device.tier.ctxTokens * 2, 32768)
+            : device.tier.ctxTokens
 
         DispatchQueue.global(qos: .userInitiated).async {
             let ok = LlamaEngine.shared.load(modelId: m.id,
                                              path: store.localPath(for: m),
-                                             ctxTokens: device.tier.ctxTokens,
+                                             ctxTokens: ctxTokens,
                                              gpuLayers: device.tier.gpuLayers,
                                              sizeGB: m.sizeGB)
             if !ok {
@@ -348,16 +385,27 @@ struct ChatView: View {
                 return
             }
 
-            var sys = "你是 RyMind 的本地助手，运行在 iPad 上、全程离线。回答简洁直接，用中文。"
+            var sys = """
+            你是 RyMind 的本地助手，跑在 iPad 上、全程离线、没有联网。
+            必须遵守：
+            1. 用简体中文回答，简洁直接，一句话能说完就别说第二段。
+            2. 数学和逻辑题：一步步算，算完才给最终答案。答案必须正确，1+1 就是 2，绝不能说成 3；
+               算不出来就直说"我算不出来"，绝不编数字。
+            3. 回答要扣题。用户问什么答什么，不要复述用户的问题，不要东拉西扯，不要胡诌名人和事实。
+            4. 不确定或不知道的事，直接说不确定；不要编造。
+            5. 代码给能直接跑的最小示例，不要写"此处省略"这类空话。
+            6. 不要重复自己说过的话，不要堆废话。
+            """
             if let s = attachedSkillName {
-                sys += "\n\n你正在使用技能「\(s)」，按它的说明办事。"
+                sys += "\n\n你正在使用技能「\(s)」，严格按这个技能的说明办事。"
             }
             if attachedImage != nil {
-                sys += "\n\n用户附带了一张参考图，参照它的构图/配色来理解问题。"
+                sys += "\n\n用户附了一张参考图，你要参照它的构图和配色来理解问题。"
             }
 
             var acc = ""
-            let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: q, maxTokens: 256) { piece in
+            let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: q,
+                                                       history: history) { piece in
                 acc += piece
                 let snap = acc
                 DispatchQueue.main.async { sessions.replace(id: botId, with: snap) }
@@ -365,7 +413,7 @@ struct ChatView: View {
 
             DispatchQueue.main.async {
                 var final = produced
-                if final.isEmpty { final = "（这次没吐出东西，换个问题或换个模型试试）" }
+                if final.isEmpty { final = "（这次没吐出东西，换个问题或换个模型试试；可在「高级」页把输出长度调大）" }
                 sessions.replace(id: botId, with: final)
                 device.usedGB = device.footprintGB
                 statusLine = ""
