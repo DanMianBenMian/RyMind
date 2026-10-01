@@ -18,6 +18,8 @@ struct ImageGenView: View {
     @State private var results: [UIImage] = []
     @State private var previewItem: LoadedImage?
     @State private var note = ""
+    /// 当前这张的取消开关（点「生成中…点停止」就掐掉）
+    @State private var cancelJob: RMCancelToken? = nil
 
     private let sizes = [384, 512, 768]
 
@@ -201,44 +203,70 @@ struct ImageGenView: View {
 
     private func generate() {
         if running {
+            // 点停止：掐掉当前这张，界面立刻恢复
+            cancelJob?.cancel()
+            cancelJob = nil
             running = false
-            stage = "已停止"
+            progress = 0
+            stage = ""
+            note = "已停止"
             return
         }
         guard lock.acquire(.image) else { return }
-        // ⚠️ 这几个 @State 只能在主线程改：后台线程写 @State 会踩 SwiftUI 的独占访问，真·崩溃
-        DispatchQueue.main.async {
-            self.running = true
-            self.note = ""
-            self.progress = 0.05
-            self.stage = "准备本地管线…"
-        }
 
         let ref = reference
         let st = RMBitmap.Style.allCases[styleIdx]
         let pal = RMBitmap.palettes.keys.sorted()[paletteIdx]
         let sz = sizes[sizeIdx]
         let sd = seed
-        let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         let seq = results.count + 1
 
-        DispatchQueue.global(qos: .userInitiated).async {
-            // 计算全在后台，绝不碰 @State
-            let img = RMBitmap.render(size: sz, seed: sd, style: st, paletteName: pal, referencing: ref)
-            let png = img.flatMap { $0.pngData() }
+        let token = RMCancelToken()
+        cancelJob = token
+        // ⚠️ 只有主线程能读写这几个 @State；后台线程一律只干活、不碰界面
+        running = true
+        note = ""
+        progress = 0.02
+        stage = (reference != nil ? "读取参考图…" : "准备本地管线…")
 
+        let job = RMPixelJob(opt: RMPixelJob.Opt(size: sz, seed: sd, style: st,
+                                                 paletteName: pal, reference: ref))
+        DispatchQueue.global(qos: .userInitiated).async {
+            var finished: UIImage? = nil
+            var ticks = 0
+            // 分片出图：算一小片 → 回报一次进度 → 让出一次线程（界面不会像卡死，也随时能停）
+            while job.step(rows: 8) {
+                if token.isCancelled { break }
+                ticks += 1
+                if ticks % 2 == 0 {
+                    let pct = job.progress
+                    DispatchQueue.main.async {
+                        self.progress = 0.02 + 0.75 * pct
+                        self.stage = "生成像素…\(Int(pct * 100))%"
+                    }
+                }
+                Thread.sleep(forTimeInterval: 0.012)
+            }
+            if !token.isCancelled {
+                finished = job.makeImage()
+            }
+            let out = finished
+            let cancelled = token.isCancelled
             DispatchQueue.main.async {
                 self.running = false
                 self.progress = 0
                 self.stage = ""
-                if let out = img {
+                if let out, !cancelled {
                     self.results.insert(out, at: 0)
-                    // 顺手存进工作空间的 studio 目录
-                    if let d = png {
+                    // 结果别无限堆（内存大头），留最近 6 张
+                    if self.results.count > 6 { self.results.removeLast() }
+                    if let d = out.pngData() {
                         FileStore.shared.writeData(name: "studio/rmind-\(sd % 100000)-v\(seq).png", data: d)
                     }
+                } else if cancelled {
+                    self.note = "已停止（没保存这张）"
                 } else {
-                    self.note = "这次没生成出来：换个小一点的尺寸（384）或换个种子再试"
+                    self.note = "这次没生成出来：换个种子或换小尺寸（384）再试"
                 }
                 self.lock.release(.image)
             }
@@ -250,28 +278,33 @@ struct ImageGenView: View {
 
 struct LoadedImage: Identifiable {
     let img: UIImage
-    var id: UUID { UUID() }
+    /// ⚠️ 必须存一份 id：老写法 `var id: UUID { UUID() }` 每次取值都是新 UUID，
+    /// SwiftUI 的 .sheet(item:) 认不出同一个 item，会一直重建弹层 → 崩。
+    let id = UUID()
 }
 
 struct ImagePreviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     let img: UIImage
     @State private var shareItems: [Any] = []
+    /// ⚠️ pngData() 很贵（512×512 编码一次几十毫秒），老版调了三遍，又卡又吃内存。只编一次。
+    @State private var png: Data?
 
     var body: some View {
         NavigationStack {
             VStack(spacing: 10) {
-                if let jpeg = img.pngData(), let ui = UIImage(data: jpeg) {
-                    Image(uiImage: ui).resizable().scaledToFit().padding(12)
-                } else {
-                    Image(uiImage: img).resizable().scaledToFit().padding(12)
+                Group {
+                    if let png, let ui = UIImage(data: png) {
+                        Image(uiImage: ui).resizable().scaledToFit().padding(12)
+                    } else {
+                        Image(uiImage: img).resizable().scaledToFit().padding(12)
+                            .onAppear { png = img.pngData() }
+                    }
                 }
                 HStack(spacing: 14) {
-                    if let png = img.pngData() {
-                        Button {
-                            shareItems = [png]
-                        } label: { Label("分享", systemImage: "square.and.arrow.up") }
-                    }
+                    Button {
+                        if let png { shareItems = [png] }
+                    } label: { Label("分享", systemImage: "square.and.arrow.up") }
                     Button {
                         if let d = img.pngData() {
                             FileStore.shared.writeData(name: "studio/save-\(Date().timeIntervalSince1970).png", data: d)
@@ -290,8 +323,6 @@ struct ImagePreviewSheet: View {
             }
         }
     }
-
-    static func item(_ img: UIImage) -> Any { img }
 }
 
 // MARK: - 分享（iOS 16 的 ShareLink 对 Data 不好使，直接用系统分享面板）
