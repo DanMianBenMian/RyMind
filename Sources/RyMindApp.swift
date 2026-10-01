@@ -14,12 +14,22 @@ struct RyMindApp: App {
     @UIApplicationDelegateAdaptor(RyAppDelegate.self) var appDelegate
     @StateObject private var taskLock = TaskLock()
     @StateObject private var device = DeviceProfile()
+    @ObservedObject private var trace = RMTrace.shared
+
+    init() {
+        // 越早越好：崩了也要把栈写进日志
+        RMTrace.shared.installHandlers()
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] ?? "?"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] ?? "?"
+        RMTrace.shared.log("启动 v\(v) build \(b)", tag: "app")
+    }
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environmentObject(taskLock)
                 .environmentObject(device)
+                .environmentObject(RMTrace.shared)
                 .environmentObject(ModelStore.shared)
                 .environmentObject(ModelDownloader.shared)
                 .environmentObject(SessionStore.shared)
