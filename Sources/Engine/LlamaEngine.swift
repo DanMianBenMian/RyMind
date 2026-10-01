@@ -67,12 +67,14 @@ final class LlamaEngine: ObservableObject {
     private func renderChat(brand: String, system: String, turns: [(Bool, String)]) -> String {
         switch brand {
         case "llama":
-            var s = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n"
+            // ⚠️ Llama-3 的模板比 ChatML 严：<|eot_id|> 后面直接跟下一个 <|start_header_id|>，
+            // 中间多一个换行就会让模型"没进入角色"，输出一串乱码/复读。别自作聪明加 \n。
+            var s = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)<|eot_id|>"
             for t in turns {
                 let who = t.0 ? "user" : "assistant"
-                s += "<|start_header_id|>\(who)<|end_header_id|>\n\n\(t.1)<|eot_id|>\n"
+                s += "<|start_header_id|>\(who)<|end_header_id|>\n\n\(t.1)<|eot_id|>"
             }
-            return s + "<|start_header_id|>assistant<|end_header_id|>\n\n"
+            return s + "<|start_header_id|>assistant<|end_header_id|>\n"
         case "gemma":
             var s = "<bos>"
             for t in turns {
@@ -157,71 +159,120 @@ final class LlamaEngine: ObservableObject {
     private func freshContext() -> OpaquePointer? {
         guard let m = model else { return nil }
         var cp = llama_context_default_params()
-        cp.n_ctx    = UInt32(nCtx)
-        cp.n_batch  = UInt32(min(512, Int(nCtx)))
-        cp.n_ubatch = 512
+        cp.n_ctx = UInt32(nCtx)
+        // ⚠️ n_ubatch 必须和 n_batch 一致且够大：老版写死 512，
+        // 一旦提示词 + 历史超过 512 token，llama_decode 直接失败 → 一个字都吐不出来
+        let cap = UInt32(min(Int(nCtx), 2048))
+        cp.n_batch  = cap
+        cp.n_ubatch = cap
         return llama_init_from_model(m, cp)
     }
 
-    /// 采样：重复惩罚 → 温度 → top-p → 随机抽
+    /// 采样用缓冲：复用，别每 token 新建 12 万个 Float（那才是"输出长度拉满 = 点发送像没反应"的元凶）
+    private var scoreBuf = [Float]()
+    private var probBuf = [Float]()
+
+    private func ensureSampleBuf(_ n: Int) {
+        if scoreBuf.count < n {
+            scoreBuf = [Float](repeating: 0, count: n)
+            probBuf = [Float](repeating: 0, count: n)
+        }
+    }
+
+    /// 采样：重复惩罚 → 温度 → top-p → 随机抽。
+    /// ⚠️ 老版本每步都 `[Float](count: nVocab)` + 对全部词条排序（12 万个），
+    /// 温度一高就慢到几秒出一个字。这里改成：复用缓冲 + 只留 top-K 候选（默认 512）再排序。
     private func pickToken(_ lp: UnsafePointer<Float>, nVocab: Int,
                            temp: Float, topP: Float, penalty: Float,
                            recent: [Int32]) -> Int32 {
-        var scores = [Float](repeating: 0.0, count: nVocab)
-        for i in 0..<nVocab { scores[i] = lp[i] }
+        ensureSampleBuf(nVocab)
+
+        // 1) 拷 logits 到复用缓冲
+        for i in 0..<nVocab { scoreBuf[i] = lp[i] }
 
         if penalty > 0, !recent.isEmpty {
             for t in recent {
                 let i = Int(t)
-                guard i >= 0, i < nVocab, scores.indices.contains(i) else { continue }
-                if scores[i] > 0 { scores[i] -= penalty } else { scores[i] += penalty }
+                guard i >= 0, i < nVocab else { continue }
+                if scoreBuf[i] > 0 { scoreBuf[i] -= penalty } else { scoreBuf[i] += penalty }
             }
         }
 
+        // 2) 贪心
         if temp <= 0.02 {
             var best: Float = -.infinity
             var bi = 0
             var found = false
             for i in 0..<nVocab {
-                if !found || scores[i] > best { best = scores[i]; bi = i; found = true }
+                if !found || scoreBuf[i] > best { best = scoreBuf[i]; bi = i; found = true }
             }
             return Int32(bi)
         }
 
+        // 3) softmax
+        let inv = 1.0 / max(temp, 0.01)
         var maxV: Float = -.infinity
-        for i in 0..<nVocab { if scores[i] > maxV { maxV = scores[i] } }
-        var sum: Float = 0
-        var probs = [Float](repeating: 0.0, count: nVocab)
         for i in 0..<nVocab {
-            let e = expf((scores[i] - maxV) / temp)
-            probs[i] = e
+            let v = scoreBuf[i] * inv
+            probBuf[i] = v
+            if v > maxV { maxV = v }
+        }
+        var sum: Float = 0
+        for i in 0..<nVocab {
+            let e = expf(probBuf[i] - maxV)
+            probBuf[i] = e
             sum += e
         }
         guard sum > 0 else { return Int32(0) }
-        for i in 0..<nVocab { probs[i] = probs[i] / sum }
+        let norm = 1.0 / sum
+        for i in 0..<nVocab { probBuf[i] = probBuf[i] * norm }
 
-        var idx = Array(0..<nVocab)
-        idx.sort { probs[$0] > probs[$1] }
-        if topP > 0, topP < 1, let first = idx.first {
-            var acc: Float = 0
-            var last = first
-            for i in idx {
-                acc += probs[i]
-                last = i
-                if acc >= topP { break }
+        // 4) 只留 top-K 候选（插入法维护一个小顶序数组），再对这 K 个排序
+        let K = min(nVocab, 512)
+        var candIdx = [Int](repeating: -1, count: K)
+        var candVal = [Float](repeating: -.infinity, count: K)
+        var filled = 0
+        for i in 0..<nVocab {
+            let v = probBuf[i]
+            if filled < K {
+                var j = filled
+                candIdx[j] = i; candVal[j] = v; filled += 1
+                while j > 0, candVal[j] > candVal[j - 1] {
+                    candIdx.swapAt(j, j - 1); candVal.swapAt(j, j - 1); j -= 1
+                }
+            } else if v > candVal[K - 1] {
+                candVal[K - 1] = v; candIdx[K - 1] = i
+                var j = K - 1
+                while j > 0, candVal[j] > candVal[j - 1] {
+                    candIdx.swapAt(j, j - 1); candVal.swapAt(j, j - 1); j -= 1
+                }
             }
-            if last != first { idx = Array(idx.prefix(through: last)) }
         }
+        candVal.withUnsafeMutableBufferPointer { b in
+            for k in 0..<K { if candIdx[k] < 0 { candIdx[k] = k; b[k] = 0 } }
+        }
+        var order = Array(0..<K)
+        order.sort { candVal[$0] > candVal[$1] }
 
+        // 5) top-p 截断
+        var acc: Float = 0
+        var lastK = 0
+        for k in order {
+            acc += candVal[k]
+            lastK = k
+            if topP > 0, topP < 1, acc >= topP { break }
+        }
+        if lastK != 0 { order = Array(order.prefix(through: lastK)) }
+
+        // 6) 随机抽
         rngState = rngState &* 6364136223846793005 &+ 1442695040888963407
         let r = Double(rngState >> 11) / Double(UInt64(1) << 53)
-        var acc: Float = 0
-        for i in idx {
-            acc += probs[i]
-            if r <= Double(acc) { return Int32(i) }
+        var run: Float = 0
+        for k in order {
+            run += candVal[k]
+            if r <= Double(run) { return Int32(candIdx[k]) }
         }
-        if let last = idx.last { return Int32(last) }
-        return Int32(0)
+        return Int32(candIdx[order[order.count - 1]])
     }
 
     /// 生成。模板 + 终止标记 + 采样参数 + 可打断。
@@ -239,41 +290,63 @@ final class LlamaEngine: ObservableObject {
         DispatchQueue.main.async { self.isGenerating = true }
 
         let brand = key(of: brandHint)
-        // 历史 + 本次提问，整体拼成规范多轮对话再一次性 tokenize
-        let turns = Array(history.suffix(6)) + [(true, prompt)]
-        let text = renderChat(brand: brand, system: system, turns: turns)
         let cap = max(Int(nCtx), 1)
-        var pTokens = [llama_token](repeating: 0, count: cap)
+        var turns = Array(history.suffix(6))
 
+        // 提示词 + system + 历史超出窗口时，从头砍历史（保最近几轮），
+        // 不然模型只看得到尾巴 → 答非所问 / 吐垃圾
+        let limit = Int(Double(cap) * 0.70)
+        var text = ""
         var nPrompt = 0
-        text.withCString { p in
-            nPrompt = Int(llama_tokenize(v, p, Int32(text.utf8.count), &pTokens, Int32(cap), false, true))
+        while true {
+            text = renderChat(brand: brand, system: system, turns: turns + [(true, prompt)])
+            nPrompt = tokenCount(of: text, capTokens: cap)
+            if nPrompt <= limit || turns.isEmpty { break }
+            turns.removeFirst()
         }
+        var pTokens = [llama_token](repeating: 0, count: cap)
         guard nPrompt > 0, nPrompt < cap else {
-            DispatchQueue.main.async { self.isGenerating = false }
+            DispatchQueue.main.async {
+                self.isGenerating = false
+                self.note = "提示词太长，模型的上下文窗口装不下（窗口 \(cap) token）"
+            }
             return ""
         }
         DispatchQueue.main.async { self.ctxUsed = nPrompt }
 
-        var batch = llama_batch_init(Int32(nPrompt), 0, 1)
-        batch.n_tokens = Int32(nPrompt)
-        for i in 0..<nPrompt {
-            batch.token[i] = pTokens[i]
-            batch.pos[i] = Int32(i)
-            batch.n_seq_id[i] = 1
-            batch.seq_id[i]![0] = 0
-            batch.logits[i] = (i == nPrompt - 1) ? 1 : 0
+        // 提示词分块喂（超过 batch 上限就拆成几次 decode），避免长提示词 decode 失败
+        let chunk = Int32(min(nPrompt, 2048))
+        var decodeOK = true
+        var fed = 0
+        while fed < nPrompt, decodeOK {
+            let n = min(Int(chunk), nPrompt - fed)
+            var batch = llama_batch_init(Int32(n), 0, 1)
+            batch.n_tokens = Int32(n)
+            for k in 0..<n {
+                batch.token[k] = pTokens[fed + k]
+                batch.pos[k] = Int32(fed + k)
+                batch.n_seq_id[k] = 1
+                batch.seq_id[k]![0] = 0
+                batch.logits[k] = (k == n - 1) ? 1 : 0
+            }
+            decodeOK = llama_decode(c, batch) == 0
+            llama_batch_free(batch)
+            fed += n
         }
-        let ok = llama_decode(c, batch) == 0
-        llama_batch_free(batch)
-        guard ok else {
-            DispatchQueue.main.async { self.isGenerating = false }
+        guard decodeOK else {
+            if let c = ctx { llama_free(c); ctx = nil }
+            DispatchQueue.main.async {
+                self.isGenerating = false
+                self.note = "提示词 decode 失败：提示词太长或上下文太小（窗口 \(Int(nCtx)) token）"
+            }
             return ""
         }
 
         let markers = stopMarkers(brand: brand)
         let sample = RMSampleStore.load()
-        let budget = max(1, sample.maxTokens)
+        // ⚠️ 输出长度必须让位给上下文余量，否则一上来就撞到窗口边界 → 一个字都吐不出来
+        let room = max(8, cap - nPrompt - 8)
+        let budget = max(1, min(max(1, sample.maxTokens), room))
         var gen: [llama_token] = []
         var out = ""
         var produced = 0
@@ -321,9 +394,14 @@ final class LlamaEngine: ObservableObject {
             pos += 1
         }
 
+        // ⚠️ 内存：生成完立刻释放 context。KV cache 是内存大头（4096 窗口能占几百 MB），
+        // 留着不释放就会一轮一轮往上堆 —— 之前"疑似内存泄漏"就是这里。
+        if let c = ctx { llama_free(c); ctx = nil }
+
         let dt = Date().timeIntervalSince(t0)
         let rate = dt > 0 ? Double(produced) / dt : 0
         let stopped = stopFlag
+        let clamped = sample.maxTokens > room
         DispatchQueue.main.async {
             self.isGenerating = false
             self.ctxUsed = pos
@@ -332,9 +410,24 @@ final class LlamaEngine: ObservableObject {
                 ? "已手动终止（本次 \(produced) token）"
                 : (produced > 0
                     ? "本次 \(produced) token · \(String(format: "%.1f", rate)) tok/s"
-                    : "没有输出")
+                    : "没有输出（提示词或历史把上下文占满了，开短的一轮再问）")
+            if clamped {
+                self.note += "（输出长度受上下文余量限制到 \(budget) token）"
+            }
         }
         return out
+    }
+
+    /// 数一下一段文本会变成多少 token（用来判断要不要砍历史）。失败返回 0。
+    private func tokenCount(of text: String, capTokens: Int) -> Int {
+        guard !text.isEmpty, let v = vocab else { return 0 }
+        let n = max(capTokens, 64)
+        var tmp = [llama_token](repeating: 0, count: n)
+        var count = 0
+        text.withCString { p in
+            count = Int(llama_tokenize(v, p, Int32(text.utf8.count), &tmp, Int32(n), false, true))
+        }
+        return count > 0 ? count : 0
     }
 }
 
