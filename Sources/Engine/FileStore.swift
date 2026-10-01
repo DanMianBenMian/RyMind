@@ -118,6 +118,25 @@ final class FileStore: ObservableObject {
         refresh()
     }
 
+    /// 在当前目录的某个子目录里建文件夹（⚠️ 别用 makeDir：它会 lastPathComponent 把路径吃掉）
+    func makeDirIn(dir: String, name: String) {
+        let n = clean(name)
+        guard !n.isEmpty else { return }
+        let target = url(for: path).appendingPathComponent(dir).appendingPathComponent(n)
+        try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+        refresh()
+    }
+
+    /// 在当前目录的某个子目录里写文件（新建文件用，建完点开就能写）
+    func writeFileIn(dir: String, name: String, text: String = "") {
+        let n = clean(name)
+        guard !n.isEmpty else { return }
+        let target = url(for: path).appendingPathComponent(dir).appendingPathComponent(n)
+        try? text.write(to: target, atomically: true, encoding: .utf8)
+        message = "已在 \(dir) 建了 \(n)"
+        refresh()
+    }
+
     func upload(from src: URL, nameHint: String? = nil) {
         _ = src.startAccessingSecurityScopedResource()
         let data = (try? Data(contentsOf: src)) ?? Data()
@@ -135,6 +154,20 @@ final class FileStore: ObservableObject {
     func remove(name: String) {
         try? fm.removeItem(at: url(for: path).appendingPathComponent(name))
         refresh()
+    }
+
+    /// 批量删除（多选用）：一次只删当前目录下的这些名字，删完统一刷一次列表
+    func remove(names: [String]) {
+        let set = Set(names)
+        for n in set {
+            try? fm.removeItem(at: url(for: path).appendingPathComponent(n))
+        }
+        refresh()
+    }
+
+    /// 当前目录下这些名字的文件总字节（聊天里显示附件大小用）
+    func size(of name: String) -> Int64 {
+        (((try? fm.attributesOfItem(atPath: url(for: path).appendingPathComponent(name).path)[.size]) as? NSNumber)?.int64Value) ?? 0
     }
 
     func rename(from: String, to: String) {
@@ -202,7 +235,9 @@ final class FileStore: ObservableObject {
         var out: [(String, String)] = []
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        out.append(("路径", displayPath.replacingOccurrences(of: name, with: "") + name))
+        // 路径要拼对：根目录是 /rmind/xxx，子目录是 /rmind/父/xxx
+        let basePath = (path == "/" ? "" : path)
+        out.append(("路径", "/rmind\(basePath)/\(name)"))
         out.append(("大小", isDir ? "目录" : formatSize(size?.int64Value ?? 0)))
         out.append(("类型", isDir ? "文件夹" : (name.components(separatedBy: ".").last ?? "文件").uppercased()))
         out.append(("创建时间", fmt.string(from: created)))
