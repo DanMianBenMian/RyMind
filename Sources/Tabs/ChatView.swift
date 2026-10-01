@@ -1,5 +1,49 @@
 import SwiftUI
 import PhotosUI
+import UIKit
+
+/// 从文件库选中的文件（path 是 unix 路径）
+struct PickedFile: Identifiable {
+    let path: String
+    let name: String
+    var id: String { path + "/" + name }
+}
+
+/// 文件库浏览选择器（复用 FileStore 的目录树）
+private struct FilePickerSheet: View {
+    @EnvironmentObject private var fs: FileStore
+    let onPick: (String, String) -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if fs.path != "/" {
+                    Button { fs.up() } label: {
+                        Label("上一级", systemImage: "folder")
+                    }
+                }
+                ForEach(fs.entries) { e in
+                    if e.isDir {
+                        Button { fs.enter(e.name) } label: {
+                            Label(e.name, systemImage: "folder")
+                        }
+                    } else {
+                        Button { onPick(fs.path, e.name) } label: {
+                            Label(e.name, systemImage: "doc")
+                        }
+                    }
+                }
+            }
+            .listStyle(.plain)
+            .background(RMTheme.rail)
+            .navigationTitle("从文件库选")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("关闭") { fs.goRoot() } }
+            }
+        }
+        .onAppear { fs.refresh() }
+    }
+}
 
 struct ChatView: View {
     @EnvironmentObject private var lock: TaskLock
@@ -19,16 +63,38 @@ struct ChatView: View {
     @State private var photoItem: PhotosPickerItem?
     @State private var attachedImage: UIImage?
     @State private var attachedSkillName: String?
+    @State private var attachedFile: PickedFile?
+    @State private var showFilePick = false
 
     init(landscape: Bool) { self.landscape = landscape }
 
     private var messages: [ChatMessage] { sessions.messages }
     private var generating: Bool { engine.isGenerating }
 
-    /// 进度条用真实值：实际用掉 / 模型实际上下文；Max 模式另外标存档窗口
-    private var usedK: Double { Double(engine.ctxUsed) / 1024.0 }
-    private var realK: Double { Double(max(engine.ctxTotal, 1)) / 1024.0 }
-    private var savedK: Double { maxMode ? 1000.0 : 0 }
+    /// 上下文用量 = **当前打开这个会话**的占用（模型没加载/切会话都会跟着变）。
+    /// 没加载模型时用本地估算（中文约 1 token/字、英文 4 字符 1 token）；生成中则优先用引擎真实值。
+    private var sessionTokens: Int {
+        var n = estTokens(sessions.currentTitle) + 8   // 模板本身的开销
+        for m in sessions.messages { n += estTokens(m.text) }
+        return n
+    }
+    private var usedTokens: Int {
+        engine.isLoaded ? max(engine.ctxUsed, sessionTokens) : sessionTokens
+    }
+    private var usedK: Double { Double(max(usedTokens, 1)) / 1024.0 }
+    /// Max 模式直接按 1000k 存档窗口显示；平时用模型真实窗口
+    private var realK: Double { maxMode ? 1000.0 : Double(max(engine.ctxTotal, 1)) / 1024.0 }
+
+    /// token 粗估（够用来显示"用了多少"）
+    private func estTokens(_ s: String) -> Int {
+        var cjk = 0
+        for sc in s.unicodeScalars {
+            let v = sc.value
+            if (v >= 0x4E00 && v <= 0x9FFF) || (v >= 0x3000 && v <= 0x30FF) || (v >= 0x3400 && v <= 0x4DBF) { cjk += 1 }
+        }
+        let rest = max(0, s.count - cjk)
+        return cjk + rest / 4 + 1
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -38,6 +104,17 @@ struct ChatView: View {
         .background(RMTheme.bg)
         .sheet(isPresented: $showSessions) { sessionSheet }
         .sheet(isPresented: $showAttach) { attachSheet }
+        .sheet(isPresented: $showFilePick) {
+            FilePickerSheet { path, name in
+                attachedFile = PickedFile(path: path, name: name)
+                showFilePick = false
+            }
+        }
+        // 兜底：键盘弹起来时，任何不该开的弹层一律收掉（之前点输入框会冒出会话选择器）
+        .onReceive(NotificationCenter.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            showSessions = false
+            showFilePick = false
+        }
     }
 
     // MARK: - 主区
@@ -89,16 +166,16 @@ struct ChatView: View {
                 }
             }
 
-            // 真实进度：本次已用 / 模型实际窗口
+            // 进度：当前会话已用 / 窗口（Max 就是 1000k）
             ProgressView(value: min(usedK, realK), total: max(realK, 0.001))
                 .tint(RMTheme.accent)
 
             HStack(spacing: 6) {
-                Text(String(format: "上下文已用 %.1fk / %.0fk", usedK, realK))
+                Text(String(format: "上下文已用 %.2fk / %.0fk", usedK, realK))
                     .font(.system(size: 11))
                     .foregroundStyle(RMTheme.accent)
                 if maxMode {
-                    Text("· 存档 1000k，本次只喂相关片段")
+                    Text("· 1000k 存档窗口，只喂本次相关片段（不占满 KV）")
                         .font(.system(size: 11))
                         .foregroundStyle(RMTheme.textSub)
                 }
@@ -194,14 +271,22 @@ struct ChatView: View {
 
     private var sessionSidebar: some View {
         VStack(spacing: 0) {
-            HStack {
+            HStack(spacing: 8) {
                 Text("对话记录").font(.system(size: 13, weight: .medium)).foregroundStyle(RMTheme.text)
                 Spacer()
-                Button { newChat() } label: {
-                    Image(systemName: "square.compose")
-                        .font(.system(size: 13))
-                        .foregroundStyle(RMTheme.accent)
+                // 横屏这里必须能看见「新建」——带文字的按钮，别靠猜
+                Button(action: newChat) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "square.compose").font(.system(size: 12))
+                        Text("新建").font(.system(size: 12, weight: .medium))
+                    }
+                    .foregroundStyle(Color(hex: 0x0B1F1B))
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(RMTheme.accent)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                 }
+                .buttonStyle(.plain)
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 12)
@@ -227,7 +312,10 @@ struct ChatView: View {
                     sessionRow(s, compact: true)
                 }
                 .onDelete { idx in
-                    for i in idx { sessions.delete(sessions.sessions[i].id) }
+                    // 倒序删（删完会自动补一个「新对话」，索引会变，别正序乱取）
+                    for i in idx.sorted().reversed() where i < sessions.sessions.count {
+                        sessions.delete(sessions.sessions[i].id)
+                    }
                 }
             }
             .listStyle(.plain)
@@ -273,7 +361,15 @@ struct ChatView: View {
         .background(current ? RMTheme.surface : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contentShape(Rectangle())
-        .onTapGesture { sessions.select(s.id); if compact { showSessions = false } }
+        .onTapGesture { switchTo(s.id); if compact { showSessions = false } }
+    }
+
+    /// 切会话：先掐掉正在生成的这一轮（否则旧回答会继续往新会话里写）、清掉输入框状态
+    private func switchTo(_ id: UUID) {
+        if engine.isGenerating { engine.stop() }
+        input = ""
+        statusLine = ""
+        sessions.select(id)
     }
 
     private var attachSheet: some View {
@@ -290,8 +386,23 @@ struct ChatView: View {
                         }
                     } else {
                         PhotosPicker(selection: $photoItem, matching: .images) {
-                            Label("从相册选一张参考图", systemImage: "photo.badge.plus")
+                            Label("图片 · 从相册选一张", systemImage: "photo.badge.plus")
                         }
+                    }
+                }
+                Section("文件") {
+                    if let f = attachedFile {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(f.name).font(.system(size: 13)).foregroundStyle(RMTheme.text)
+                                Text("来自 \(f.path)").font(.system(size: 11)).foregroundStyle(RMTheme.textSub)
+                            }
+                            Spacer()
+                            Button("移除") { attachedFile = nil }
+                                .foregroundStyle(RMTheme.danger)
+                        }
+                    } else {
+                        Button("从文件库选择文件") { showFilePick = true }
                     }
                 }
                 Section("Skill") {
@@ -346,10 +457,21 @@ struct ChatView: View {
         guard !q.isEmpty else { return }
         guard lock.acquire(.chat) else { return }
 
+        // 拼真正发给模型的提问（小文本文件直接带正文，大的只报路径）
+        var body = q
         var notice = ""
+        if let f = attachedFile {
+            if let d = FileStore.shared.readAt(f.path),
+               let txt = String(data: d, encoding: .utf8), d.count <= 16384 {
+                body += "\n\n[用户给的文件：\(f.name)]\n---\n\(txt)\n---\n"
+                notice += "（附带文件：\(f.name)）"
+            } else {
+                notice += "（引用文件：\(f.name)，路径 \(f.path)）"
+            }
+        }
         if let s = attachedSkillName { notice += "（已附加 Skill：\(s)）" }
-        if attachedImage != nil { notice += "（含一张参考图）" }
-        sessions.append(text: notice.isEmpty ? q : q + notice, isUser: true)
+        if attachedImage != nil { notice += "（含一张图片）" }
+        sessions.append(text: notice.isEmpty ? body : body + notice, isUser: true)
         input = ""
 
         guard let m = store.route(for: q) else {
@@ -359,6 +481,7 @@ struct ChatView: View {
         }
         let botId = UUID()
         sessions.append(ChatMessage(id: botId, text: "…", isUser: false))
+        let finalPrompt = body
         statusLine = m.isMoE ? "命中 \(m.name)（MoE：只激活部分专家）" : "命中 \(m.name)，其余模型不加载"
 
         // 多轮历史（去掉刚加的占位回答）
@@ -403,9 +526,9 @@ struct ChatView: View {
                 sys += "\n\n用户附了一张参考图，你要参照它的构图和配色来理解问题。"
             }
 
-            var acc = ""
-            let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: q,
-                                                       history: history) { piece in
+        var acc = ""
+        let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: finalPrompt,
+                                                   history: history) { piece in
                 acc += piece
                 let snap = acc
                 DispatchQueue.main.async { sessions.replace(id: botId, with: snap) }
