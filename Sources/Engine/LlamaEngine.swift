@@ -92,6 +92,22 @@ final class LlamaEngine: ObservableObject {
         }
     }
 
+    /// 把一段文本里的 ``` 代码块围栏去掉（保留代码正文，只拆 fences），
+    /// 让模型不再被上一轮残留的"代码上下文"带跑。
+    private static func descrub(_ s: String) -> String {
+        guard s.contains("```") else { return s }
+        var out = ""
+        var inFence = false
+        for line in s.split(separator: "\n", omittingEmptySubsequences: false) {
+            if line.trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                inFence.toggle()
+                continue
+            }
+            out += inFence ? "（此处有代码略）\n" : line + "\n"
+        }
+        return out
+    }
+
     private func stopMarkers(brand: String) -> [String] {
         switch brand {
         case "llama": return ["<|eot_id|>", "<|endoftext|>"]
@@ -116,7 +132,10 @@ final class LlamaEngine: ObservableObject {
         var mp = llama_model_default_params()
         mp.n_gpu_layers = Int32(gpuLayers)
 
-        guard let m = llama_model_load_from_file(path, mp) else { return false }
+        guard let m = llama_model_load_from_file(path, mp) else {
+            RMTrace.shared.log("模型加载失败 path=…\(path.suffix(48)) gpuLayers=\(gpuLayers)", tag: "engine")
+            return false
+        }
         model = m
         vocab = llama_model_get_vocab(m)
         nCtx = Int32(ctxTokens)
@@ -280,18 +299,24 @@ final class LlamaEngine: ObservableObject {
     @discardableResult
     func generate(brandHint: String, system: String, prompt: String,
                   history: [(Bool, String)] = [],
+                  maxTokensOverride: Int? = nil,
                   onToken: ((String) -> Void)? = nil) -> String {
         guard let v = vocab, model != nil else { return "" }
 
         if let old = ctx { llama_free(old); ctx = nil }
-        guard let c = freshContext() else { return "" }
+        guard let c = freshContext() else {
+            RMTrace.shared.log("freshContext 失败（可能内存不够）", tag: "engine")
+            return ""
+        }
         ctx = c
         stopFlag = false
         DispatchQueue.main.async { self.isGenerating = true }
 
         let brand = key(of: brandHint)
         let cap = max(Int(nCtx), 1)
-        var turns = Array(history.suffix(6))
+        // ⚠️ 历史里的 ``` 代码围栏必须清掉：只要上一轮的回答停在半截代码块里，
+        // 后面每一轮模型都会"接着这个代码块往下写"，看起来就是"不管问什么都吐代码"。
+        var turns = Array(history.suffix(6)).map { (isUser, text) in (isUser, Self.descrub(text)) }
 
         // 提示词 + system + 历史超出窗口时，从头砍历史（保最近几轮），
         // 不然模型只看得到尾巴 → 答非所问 / 吐垃圾
@@ -309,6 +334,7 @@ final class LlamaEngine: ObservableObject {
             DispatchQueue.main.async {
                 self.isGenerating = false
                 self.note = "提示词太长，模型的上下文窗口装不下（窗口 \(cap) token）"
+                RMTrace.shared.log("提示词装不下 cap=\(cap) nPrompt=\(nPrompt)", tag: "engine")
             }
             return ""
         }
@@ -338,6 +364,7 @@ final class LlamaEngine: ObservableObject {
             DispatchQueue.main.async {
                 self.isGenerating = false
                 self.note = "提示词 decode 失败：提示词太长或上下文太小（窗口 \(self.nCtx) token）"
+                RMTrace.shared.log("decode 失败 cap=\(self.nCtx) nPrompt=\(nPrompt)", tag: "engine")
             }
             return ""
         }
@@ -346,7 +373,10 @@ final class LlamaEngine: ObservableObject {
         let sample = RMSampleStore.load()
         // ⚠️ 输出长度必须让位给上下文余量，否则一上来就撞到窗口边界 → 一个字都吐不出来
         let room = max(8, cap - nPrompt - 8)
-        let budget = max(1, min(max(1, sample.maxTokens), room))
+        // 外部指定的上限（Max 模式给更长推理链）优先，其次才是高级页滑条
+        let want = maxTokensOverride ?? sample.maxTokens
+        let budget = max(1, min(max(1, want), room))
+        RMTrace.shared.log("解码：maxTokens=\(budget) 窗口余量=\(room) 提示词=\(nPrompt)", tag: "engine")
         var gen: [llama_token] = []
         var out = ""
         var produced = 0
