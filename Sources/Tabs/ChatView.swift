@@ -654,10 +654,11 @@ struct ChatView: View {
         var history: [(Bool, String)] = []
         for msg in messages.dropLast() { history.append((msg.isUser, msg.text)) }
 
-        // ⚠️ Max 模式**不再把推理窗口翻倍**：那才是"一开 Max 就变高负载/卡"的原因。
-        // 它只影响上下文显示（按 1000k 存档窗口算）和历史筛选，推理窗口照旧。
-        let ctxTokens = device.tier.ctxTokens
+        // Max = **真的高强度思考**：换更大一档的推理窗口（装得下更长历史 + 更长的推理链），
+        // 同时放宽输出上限，让模型能把推理写完，不再一刀切 512 就掐断。
+        let ctxTokens = maxMode ? device.tier.maxCtxTokens : device.tier.ctxTokens
         let gpu = device.metalEnabled ? device.tier.gpuLayers : 0
+        RMTrace.shared.log("生成 model=\(m.name) ctx=\(ctxTokens) gpu=\(gpu) max=\(maxMode) history=\(history.count) promptChars=\(finalPrompt.count)", tag: "chat")
 
         DispatchQueue.global(qos: .userInitiated).async {
             let ok = LlamaEngine.shared.load(modelId: m.id,
@@ -701,8 +702,12 @@ struct ChatView: View {
 
         var acc = ""
         let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: finalPrompt,
-                                                   history: history) { piece in
+                                                   history: history,
+                                                   maxTokensOverride: maxMode ? 2048 : nil) { piece in
                 acc += piece
+                if acc.count <= 160 {
+                    RMTrace.shared.log("首段输出：\(acc.prefix(160).replacingOccurrences(of: "\n", with: " / "))", tag: "gen")
+                }
                 let snap = acc
                 DispatchQueue.main.async { sessions.replace(id: botId, with: snap) }
             }
