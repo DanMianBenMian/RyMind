@@ -337,7 +337,7 @@ final class LlamaEngine: ObservableObject {
             if let c = ctx { llama_free(c); ctx = nil }
             DispatchQueue.main.async {
                 self.isGenerating = false
-                self.note = "提示词 decode 失败：提示词太长或上下文太小（窗口 \(Int(nCtx)) token）"
+                self.note = "提示词 decode 失败：提示词太长或上下文太小（窗口 \(self.nCtx) token）"
             }
             return ""
         }
