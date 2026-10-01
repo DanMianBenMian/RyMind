@@ -18,7 +18,7 @@ struct AdvancedView: View {
     var body: some View {
         Form {
             Section("生成方式") {
-                Text("这几个值下一次发消息就生效，不用重启 App。默认让你关掉随机（温度 0），小模型最不容易跑偏；想要发挥再往上调。")
+                Text("改完下次发消息立刻生效，不用重启 App。出厂默认就是「发挥」预设（温度 1.0 / 惩罚 0.20 / top-p 0.95 / 768 token）；想要最稳就切到「稳」（温度 0 贪心解码，小模型最不容易跑偏）。")
                     .font(.system(size: 12))
                     .foregroundStyle(RMTheme.textSub)
             }
