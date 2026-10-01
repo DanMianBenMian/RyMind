@@ -32,7 +32,8 @@ fileprivate func rmByte(_ d: Double) -> UInt8 {
 ///    相当于"在参考图基础上改进"，而不是凭空画个圆。
 ///  · 没参考图 → 程序化生成：fBm 分形噪声 + 调色板 + 构图（星云 / 山脊 / 波纹 / 网格）。
 ///
-/// 先算 180×180 的小图再放大到目标尺寸（放大用高质量插值），这样在 iPad 上也是秒级出图。struct RMBitmap {
+/// 先算 180×180 的小图再放大到目标尺寸（放大用高质量插值），这样在 iPad 上也是秒级出图。
+struct RMBitmap {
 
     typealias RGB = (r: Float, g: Float, b: Float)
 
