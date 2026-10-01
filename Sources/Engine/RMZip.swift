@@ -155,9 +155,9 @@ enum RMZip {
             out.withUnsafeMutableBytes { db -> Int32 in
 
                 var st = z_stream()
-                st.next_in = sb.baseAddress?.assumingMemoryBound(to: Bytef.self)
+                st.next_in = sb.baseAddress!.withMemoryRebound(to: Bytef.self, capacity: sb.count)
                 st.avail_in = uInt(blob.count)
-                st.next_out = db.baseAddress?.assumingMemoryBound(to: Bytef.self)
+                st.next_out = db.baseAddress!.withMemoryRebound(to: Bytef.self, capacity: db.count)
                 st.avail_out = uInt(out.count)
                 deflateInit2_(&st, 6, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
                 let r = deflate(&st, Z_FINISH)
@@ -175,9 +175,9 @@ enum RMZip {
         let rc = out.withUnsafeMutableBytes { db -> Int32 in
             src.withUnsafeBytes { sb -> Int32 in
                 var st = z_stream()
-                st.next_in = sb.baseAddress?.assumingMemoryBound(to: Bytef.self)
+                st.next_in = sb.baseAddress!.withMemoryRebound(to: Bytef.self, capacity: sb.count)
                 st.avail_in = uInt(src.count)
-                st.next_out = db.baseAddress?.assumingMemoryBound(to: Bytef.self)
+                st.next_out = db.baseAddress!.withMemoryRebound(to: Bytef.self, capacity: db.count)
                 st.avail_out = uInt(out.count)
                 inflateInit2_(&st, -15, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
                 let r = inflate(&st, Z_FINISH)
