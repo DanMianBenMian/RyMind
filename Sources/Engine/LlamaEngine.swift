@@ -3,27 +3,27 @@ import SwiftUI
 
 /// llama.cpp 引擎（GGUF + Metal）。
 ///
-/// 省内存的手段（对应"一次对话不把整个模型跑进去"）：
-///  1. mmap 惰性分页（llama_model_params 默认 mmap 开、mlock 关）→ 只把跑到的权重页调入物理内存
-///  2. 独占加载 → 同一时刻只有一个模型在内存里，切模型前先 unload
+/// 省内存（对应"一次对话不把整个模型跑进去"）：
+///  1. mmap 惰性分页（默认开、mlock 关）→ 只把跑到的权重页调入物理内存
+///  2. 独占加载 → 同一时刻只有一个模型在内存里
 ///  3. n_gpu_layers 按内存预算决定上 Metal 的层数
 ///  4. 每次生成用全新 context → KV 干净
 ///
-/// 输出质量（修 Qwen 之类小模型"开头标点、复读、跑题"三大毛病）：
-///  · 按品牌拼 **对话模板**（im_start / llama header / gemma turn），而不是把问题裸喂进去
-///  · 认 **品牌对应的终止标记**（<|im_end|> / <|eot_id|> / <end_of_turn|>），一撞上就停
-///  · 贪心 + **重复惩罚**（最近 8 个 token 打 0.45 折、24 个打 0.72 折、更早 0.9 折）
+/// 输出质量（修小模型"开头标点、复读、跑题、算错数"）：
+///  · 按品牌拼对话模板（im_start / llama header / gemma turn）
+///  · 认品牌对应的终止标记，一撞上就停
+///  · 默认贪心（温度 0）+ 重复惩罚；温度/惩罚/top-p/输出长度走「高级」页
 final class LlamaEngine: ObservableObject {
     static let shared = LlamaEngine()
 
-    private var model: OpaquePointer?    // llama_model *
-    private var ctx: OpaquePointer?      // llama_context *
-    private var vocab: OpaquePointer?    // const llama_vocab *
+    private var model: OpaquePointer?
+    private var ctx: OpaquePointer?
+    private var vocab: OpaquePointer?
     private var loadedId: String?
     private var nCtx: Int32 = 4096
     private var backendReady = false
 
-    // ---- 实时统计（性能页直接用真实值，不再是示例值）----
+    // ---- 实时统计（性能页用真实值）----
     @Published private(set) var tps: Double = 0
     @Published private(set) var ctxUsed: Int = 0
     @Published private(set) var ctxTotal: Int = 0
@@ -32,8 +32,19 @@ final class LlamaEngine: ObservableObject {
     @Published private(set) var loadedSizeGB: Double = 0
     @Published private(set) var note: String = "未加载模型"
 
+    /// 生成中：发送键变终止键
+    @Published private(set) var isGenerating = false
+    private var stopFlag = false
+    private var rngState: UInt64 = 0x9E3779B97F4A7C15
+
+    // ---- 采样参数（「高级」页改这里，下一次生成就用新值）----
+
+    /// 只从 UserDefaults 读；改值请走 RMSampleStore.save()
+    var sample: RMSample { RMSampleStore.load() }
+
     var loadedModelId: String? { loadedId }
     var isLoaded: Bool { model != nil }
+    var contextWindow: Int { Int(nCtx) }
 
     private init() {}
 
@@ -53,9 +64,9 @@ final class LlamaEngine: ObservableObject {
     private func template(brand: String, system: String, user: String) -> String {
         switch brand {
         case "llama":
-            return "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            return "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\(system)\n\n<|start_header_id|>user<|end_header_id|>\n\n\(user)<|eot_id|><|start_of_turn>assistant\n\n"
         case "gemma":
-            return "<bos><start_of_turn>system\n\(system)\n<end_of_turn>\n<start_of_turn>user\n\(user)<end_of_turn>\n<start_of_turn>assistant\n"
+            return "<bos><start_of_turn>system\n\(system)\n<end_of_turn>\n<start_of_turn>user\n\(user)<|end_of_turn>\n<start_of_turn>assistant\n"
         default:
             return "<|im_start|>system\n\(system)<|im_end|>\n<|im_start|>user\n\(user)<|im_end|>\n<|im_start|>assistant\n"
         }
@@ -67,6 +78,12 @@ final class LlamaEngine: ObservableObject {
         case "gemma": return ["<end_of_turn>", "<start_of_turn>"]
         default:      return ["<|im_end|>", "<|im_start|>", "<|endoftext|>"]
         }
+    }
+
+    /// 点「终止」
+    func stop() {
+        guard isGenerating else { return }
+        stopFlag = true
     }
 
     @discardableResult
@@ -85,7 +102,6 @@ final class LlamaEngine: ObservableObject {
         nCtx = Int32(ctxTokens)
         loadedId = modelId
 
-        let brand = key(of: modelId)
         DispatchQueue.main.async {
             self.loadedSizeGB = sizeGB
             self.ctxTotal = ctxTokens
@@ -97,7 +113,6 @@ final class LlamaEngine: ObservableObject {
                 ? "\(modelId) 已加载 · Metal \(gpuLayers) 层"
                 : "\(modelId) 已加载 · 纯 CPU"
         }
-        _ = brand
         return true
     }
 
@@ -130,18 +145,91 @@ final class LlamaEngine: ObservableObject {
         return llama_init_from_model(m, cp)
     }
 
-    /// 生成。会按品牌拼好对话模板、认终止标记、加重复惩罚。
+    /// 采样：重复惩罚 → 温度 → top-p → 随机抽
+    private func pickToken(_ lp: UnsafePointer<Float>, nVocab: Int,
+                           temp: Float, topP: Float, penalty: Float,
+                           recent: [Int32]) -> Int32 {
+        var scores = [Float](repeating: 0.0, count: nVocab)
+        for i in 0..<nVocab { scores[i] = lp[i] }
+
+        if penalty > 0, !recent.isEmpty {
+            for t in recent {
+                let i = Int(t)
+                guard i >= 0, i < nVocab, scores.indices.contains(i) else { continue }
+                if scores[i] > 0 { scores[i] -= penalty } else { scores[i] += penalty }
+            }
+        }
+
+        if temp <= 0.02 {
+            var best: Float = -.infinity
+            var bi = 0
+            var found = false
+            for i in 0..<nVocab {
+                if !found || scores[i] > best { best = scores[i]; bi = i; found = true }
+            }
+            return Int32(bi)
+        }
+
+        var maxV: Float = -.infinity
+        for i in 0..<nVocab { if scores[i] > maxV { maxV = scores[i] } }
+        var sum: Float = 0
+        var probs = [Float](repeating: 0.0, count: nVocab)
+        for i in 0..<nVocab {
+            let e = expf((scores[i] - maxV) / temp)
+            probs[i] = e
+            sum += e
+        }
+        guard sum > 0 else { return Int32(0) }
+        for i in 0..<nVocab { probs[i] = probs[i] / sum }
+
+        var idx = Array(0..<nVocab)
+        idx.sort { probs[$0] > probs[$1] }
+        if topP > 0, topP < 1, let first = idx.first {
+            var acc: Float = 0
+            var last = first
+            for i in idx {
+                acc += probs[i]
+                last = i
+                if acc >= topP { break }
+            }
+            if last != first { idx = Array(idx.prefix(through: last)) }
+        }
+
+        rngState = rngState &* 6364136223846793005 &+ 1442695040888963407
+        let r = Double(rngState >> 11) / Double(UInt64(1) << 53)
+        var acc: Float = 0
+        for i in idx {
+            acc += probs[i]
+            if r <= Double(acc) { return Int32(i) }
+        }
+        if let last = idx.last { return Int32(last) }
+        return Int32(0)
+    }
+
+    /// 生成。模板 + 终止标记 + 采样参数 + 可打断。
+    /// history 是此前多轮（(是否用户, 文本)），会自动截断到最近 6 轮。
     @discardableResult
     func generate(brandHint: String, system: String, prompt: String,
-                  maxTokens: Int = 256, onToken: ((String) -> Void)? = nil) -> String {
+                  history: [(Bool, String)] = [],
+                  onToken: ((String) -> Void)? = nil) -> String {
         guard let v = vocab, model != nil else { return "" }
 
         if let old = ctx { llama_free(old); ctx = nil }
         guard let c = freshContext() else { return "" }
         ctx = c
+        stopFlag = false
+        DispatchQueue.main.async { self.isGenerating = true }
 
         let brand = key(of: brandHint)
-        let text = template(brand: brand, system: system, user: prompt)
+        var userPart = ""
+        let hist = Array(history.suffix(6))
+        if !hist.isEmpty {
+            for h in hist { userPart += (h.0 ? "用户：" : "助手：") + h.1 + "\n" }
+            userPart += "最新问题："
+        }
+        userPart += prompt
+
+        let text = template(brand: brand, system: system, user: userPart)
         let cap = max(Int(nCtx), 1)
         var pTokens = [llama_token](repeating: 0, count: cap)
 
@@ -149,7 +237,10 @@ final class LlamaEngine: ObservableObject {
         text.withCString { p in
             nPrompt = Int(llama_tokenize(v, p, Int32(text.utf8.count), &pTokens, Int32(cap), false, true))
         }
-        guard nPrompt > 0, nPrompt < cap else { return "" }
+        guard nPrompt > 0, nPrompt < cap else {
+            DispatchQueue.main.async { self.isGenerating = false }
+            return ""
+        }
         DispatchQueue.main.async { self.ctxUsed = nPrompt }
 
         var batch = llama_batch_init(Int32(nPrompt), 0, 1)
@@ -163,42 +254,36 @@ final class LlamaEngine: ObservableObject {
         }
         let ok = llama_decode(c, batch) == 0
         llama_batch_free(batch)
-        guard ok else { return "" }
+        guard ok else {
+            DispatchQueue.main.async { self.isGenerating = false }
+            return ""
+        }
 
         let markers = stopMarkers(brand: brand)
+        let sample = RMSampleStore.load()
+        let budget = max(1, sample.maxTokens)
         var gen: [llama_token] = []
         var out = ""
         var produced = 0
         var pos = nPrompt
         let t0 = Date()
 
-        for _ in 0..<maxTokens {
+        for _ in 0..<budget {
             guard pos < cap else { break }
+            if stopFlag { break }
             guard let lp = llama_get_logits_ith(c, -1) else { break }
             let nVocab = Int(llama_vocab_n_tokens(v))
+            guard nVocab > 0 else { break }
 
-            var pen: [Float]?
-            if gen.count >= 8 {
-                pen = [Float](repeating: 1.0, count: nVocab)
-                for (i, t) in gen.enumerated() {
-                    let idx = Int(t)
-                    guard idx > 0, idx < nVocab else { continue }
-                    let back = gen.count - i
-                    pen![idx] = back <= 8 ? 0.45 : (back <= 24 ? 0.72 : 0.9)
-                }
-            }
-
-            var best: llama_token = 0
-            var bestVal: Float = -.infinity
-            for i in 0..<nVocab {
-                let score = pen == nil ? lp[i] : lp[i] * pen![i]
-                if score > bestVal { bestVal = score; best = llama_token(i) }
-            }
-            if best == llama_vocab_eos(v) { break }
+            let recent = Array(gen.suffix(64))
+            let next = pickToken(lp, nVocab: nVocab, temp: sample.temperature,
+                                 topP: sample.topP, penalty: sample.repeatPenalty,
+                                 recent: recent)
+            if next == llama_vocab_eos(v) { break }
 
             var buf = [CChar](repeating: 0, count: 512)
-            let n = Int(llama_token_to_piece(v, best, &buf, Int32(buf.count), 0, true))
-            gen.append(best)
+            let n = Int(llama_token_to_piece(v, next, &buf, Int32(buf.count), 0, true))
+            gen.append(next)
             if n > 0 {
                 let bytes = buf.prefix(n).map { UInt8(bitPattern: $0) }
                 let piece = String(bytes: bytes, encoding: .utf8) ?? ""
@@ -211,7 +296,7 @@ final class LlamaEngine: ObservableObject {
 
             var b = llama_batch_init(1, 0, 1)
             b.n_tokens = 1
-            b.token[0] = best
+            b.token[0] = next
             b.pos[0] = Int32(pos)
             b.n_seq_id[0] = 1
             b.seq_id[0]![0] = 0
@@ -223,15 +308,49 @@ final class LlamaEngine: ObservableObject {
         }
 
         let dt = Date().timeIntervalSince(t0)
-        let used = pos
         let rate = dt > 0 ? Double(produced) / dt : 0
+        let stopped = stopFlag
         DispatchQueue.main.async {
-            self.ctxUsed = used
+            self.isGenerating = false
+            self.ctxUsed = pos
             self.tps = rate
-            self.note = produced > 0
-                ? "本次 \(produced) token · \(String(format: "%.1f", rate)) tok/s"
-                : "没有输出"
+            self.note = stopped
+                ? "已手动终止（本次 \(produced) token）"
+                : (produced > 0
+                    ? "本次 \(produced) token · \(String(format: "%.1f", rate)) tok/s"
+                    : "没有输出")
         }
         return out
+    }
+}
+
+// MARK: - 采样参数（高级页读写）
+
+struct RMSample {
+    var temperature: Float = 0.0    // 0 = 贪心（小模型最稳）
+    var repeatPenalty: Float = 0.0  // 0 = 不惩罚，0.15 左右自然
+    var topP: Float = 0.9
+    var maxTokens: Int = 256
+}
+
+enum RMSampleStore {
+    private static let key = "rymind.sampling"
+
+    static func load() -> RMSample {
+        guard let d = UserDefaults.standard.dictionary(forKey: key),
+              let t = d["temp"] as? Double,
+              let p = d["pen"] as? Double,
+              let tp = d["topp"] as? Double,
+              let mt = d["maxTokens"] as? Int else { return RMSample() }
+        return RMSample(temperature: Float(t), repeatPenalty: Float(p), topP: Float(tp), maxTokens: mt)
+    }
+
+    static func save(_ s: RMSample) {
+        UserDefaults.standard.set([
+            "temp": Double(s.temperature),
+            "pen": Double(s.repeatPenalty),
+            "topp": Double(s.topP),
+            "maxTokens": s.maxTokens
+        ], forKey: key)
     }
 }
