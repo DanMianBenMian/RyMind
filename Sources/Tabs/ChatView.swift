@@ -185,7 +185,7 @@ struct ChatView: View {
         .sheet(isPresented: Binding(get: { self.showFilePick && !self.kb.keyboardUp },
                                     set: { v in self.showFilePick = v; self.kb.keyboardUp = false })) {
             FilePickerSheet { items in
-                let add = items.filter { !self.attachedFiles.contains($0) }
+                let add = items.filter { t in !self.attachedFiles.contains { $0.path == t.0 && $0.name == t.1 } }
                 for it in add { self.attachedFiles.append(PickedFile(path: it.0, name: it.1)) }
                 if !add.isEmpty { self.showFilePick = false }
             }
@@ -509,7 +509,7 @@ struct ChatView: View {
             Form {
                 Section("图片 · 可多选（最多 6 张，发出后直接显示在聊天里）") {
                     if attachedImages.isEmpty {
-                        PhotosPicker(selection: $photoItems, matching: .images, maxSelectionCount: 6) {
+                        PhotosPicker(selection: $photoItems, maxSelectionCount: 6, matching: .images) {
                             Label("从相册选图片", systemImage: "photo.badge.plus")
                         }
                     } else {
