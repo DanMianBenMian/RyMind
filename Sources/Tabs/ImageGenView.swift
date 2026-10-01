@@ -280,6 +280,7 @@ struct ImagePreviewItem: Identifiable {
 
 struct ImagePreviewSheet: View {
     let img: UIImage
+    @State private var showShare = false
 
     var body: some View {
         NavigationStack {
@@ -321,7 +322,8 @@ extension CanvasGen {
         }
         guard let cg = one.cgImage,
               let prov = cg.dataProvider,
-              let raw = prov.data as Data, raw.count >= 4 else { return (205, 90, 60) }
+              let cf = prov.data,
+              let raw = cf as Data?, raw.count >= 4 else { return (205, 90, 60) }
         let b = [UInt8](raw) 
         return (Int(b[0]), Int(b[1]), Int(b[2]))
     }
