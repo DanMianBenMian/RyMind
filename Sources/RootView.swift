@@ -30,11 +30,11 @@ struct RootView: View {
                 if landscape {
                     HStack(spacing: 0) {
                         SideRail(tab: $tab).frame(width: 88)
-                        content
+                        content(landscape: landscape)
                     }
                 } else {
                     VStack(spacing: 0) {
-                        content
+                        content(landscape: landscape)
                         BottomBar(tab: $tab)
                     }
                 }
@@ -51,7 +51,7 @@ struct RootView: View {
     }
 
     @ViewBuilder
-    private var content: some View {
+    private func content(landscape: Bool) -> some View {
         switch tab {
         case .chat:    ChatView(landscape: landscape)
         case .image:   ImageGenView()
