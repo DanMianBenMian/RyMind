@@ -49,16 +49,39 @@ private struct FilePickerSheet: View {
 /// 用 addObserver 而不是 NotificationCenter.publisher（后者 iOS17+ 才有，当前 SDK 没有）。
 final class RMKeyboardGuard: ObservableObject {
     @Published var keyboardUp = false
+    /// 键盘高度（用来把输入框顶上来，别被键盘挡住）
+    @Published var height: CGFloat = 0
+    @Published var animation: Double = 0.25
     private var token: NSObjectProtocol?
+    private var hideToken: NSObjectProtocol?
+
     init() {
         token = NotificationCenter.default.addObserver(
             forName: UIResponder.keyboardWillShowNotification,
             object: nil,
+            queue: .main) { [weak self] n in
+                guard let self else { return }
+                if let rect = (n.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?.cgRectValue {
+                    self.height = rect.height
+                }
+                if let dur = (n.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue {
+                    self.animation = dur
+                }
+                self.keyboardUp = true
+            }
+        hideToken = NotificationCenter.default.addObserver(
+            forName: UIResponder.keyboardWillHideNotification,
+            object: nil,
             queue: .main) { [weak self] _ in
-                self?.keyboardUp = true
+                self?.keyboardUp = false
+                self?.height = 0
             }
     }
-    deinit { if let token { NotificationCenter.default.removeObserver(token) } }
+
+    deinit {
+        if let token { NotificationCenter.default.removeObserver(token) }
+        if let hideToken { NotificationCenter.default.removeObserver(hideToken) }
+    }
 }
 
 struct ChatView: View {
@@ -117,9 +140,14 @@ struct ChatView: View {
     var body: some View {
         HStack(spacing: 0) {
             if landscape { sessionSidebar }
-            mainColumn
+            // 键盘弹起时把内容顶上来：键盘高度减去系统已经让出来的安全区，
+            // 这样不管 SwiftUI 有没有自动避让，都不会被挡住也不会顶过头
+            GeometryReader { g in
+                mainColumn.padding(.bottom, max(0, kb.height - g.safeAreaInsets.bottom))
+            }
         }
         .background(RMTheme.bg)
+        .animation(.easeOut(duration: kb.animation), value: kb.keyboardUp)
         .sheet(isPresented: Binding(get: { self.showSessions && !self.kb.keyboardUp },
                                     set: { v in self.showSessions = v; self.kb.keyboardUp = false })) {
             sessionSheet
