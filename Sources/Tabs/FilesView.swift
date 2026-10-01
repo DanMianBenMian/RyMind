@@ -461,8 +461,6 @@ struct FileDetailView: View {
                     Button("粘贴到当前目录") { fs.paste() }
                     Button("删除", role: .destructive) { fs.remove(name: item.name); dismiss() }
                 }
-            }
-        }
     }
 
     /// 分页载入 hex（一次 4 KB，点"再往下"接着来），避免一次性把大文件全灌进视图
