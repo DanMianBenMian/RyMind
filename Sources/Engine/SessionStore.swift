@@ -1,17 +1,48 @@
 import Foundation
 import SwiftUI
 
+/// 一条消息的附件类型（图 / 文件 / 技能）。聊天窗口按类型**真实渲染**，
+/// 不再把图片和文件写成一行路径文字塞在正文里。
+enum ChatAttachmentKind: String, Codable {
+    case image
+    case file
+    case skill
+}
+
+struct ChatAttachment: Identifiable, Codable {
+    var id: UUID
+    var kind: ChatAttachmentKind
+    var name: String
+    /// 文件在 unix 工作空间里的路径（kind == .file 时有）
+    var path: String = ""
+    /// 图片的 png 字节（kind == .image 时有；超过 4 MB 就不存，免得 sessions.json 爆炸）
+    var data: Data? = nil
+    var sizeBytes: Int64 = 0
+
+    init(kind: ChatAttachmentKind, name: String, path: String = "", data: Data? = nil, size: Int64 = 0) {
+        self.id = UUID()
+        self.kind = kind
+        self.name = name
+        self.path = path
+        self.data = data
+        self.sizeBytes = size
+    }
+}
+
 struct ChatMessage: Identifiable, Codable {
     var id: UUID
     var text: String
     var isUser: Bool
     var ts: Date
+    /// 这条带的图 / 文件 / 技能（聊天窗口里单独渲染成卡片或缩略图）
+    var attachments: [ChatAttachment]
 
-    init(id: UUID = UUID(), text: String, isUser: Bool, ts: Date = Date()) {
+    init(id: UUID = UUID(), text: String, isUser: Bool, ts: Date = Date(), attachments: [ChatAttachment] = []) {
         self.id = id
         self.text = text
         self.isUser = isUser
         self.ts = ts
+        self.attachments = attachments
     }
 }
 
@@ -23,7 +54,11 @@ struct ChatSession: Identifiable, Codable {
     var messages: [ChatMessage]
 
     var snippet: String {
-        for m in messages.reversed() where !m.text.isEmpty { return m.text }
+        // 只发了图片/文件时正文是空的，这时候要看附件名，别在会话列表里显示成一条空白
+        for m in messages.reversed() {
+            if !m.text.isEmpty { return m.text }
+            if let a = m.attachments.first { return "[\(a.kind == .image ? "图" : a.kind == .file ? "文件" : "技能")：\(a.name)]" }
+        }
         return "没有消息"
     }
 }
@@ -116,9 +151,9 @@ final class SessionStore: ObservableObject {
 
     // MARK: - 消息
 
-    func append(text: String, isUser: Bool) {
+    func append(text: String, isUser: Bool, attachments: [ChatAttachment] = []) {
         guard let i = sessions.firstIndex(where: { $0.id == currentId }) else { return }
-        sessions[i].messages.append(ChatMessage(text: text, isUser: isUser))
+        sessions[i].messages.append(ChatMessage(text: text, isUser: isUser, attachments: attachments))
         sessions[i].updatedAt = Date()
         // 用第一条用户消息当标题，方便在列表里认
         if sessions[i].messages.count == 1, isUser, text.count > 2 {
