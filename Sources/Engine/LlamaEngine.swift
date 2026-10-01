@@ -87,7 +87,6 @@ final class LlamaEngine: ObservableObject {
 
         let brand = key(of: modelId)
         DispatchQueue.main.async {
-            self.loadedModelId = modelId
             self.loadedSizeGB = sizeGB
             self.ctxTotal = ctxTokens
             self.metalOn = gpuLayers > 0
@@ -110,8 +109,7 @@ final class LlamaEngine: ObservableObject {
         loadedId = nil
         if let h = had {
             DispatchQueue.main.async {
-                if self.loadedModelId == h {
-                    self.loadedModelId = nil
+                if self.loadedId == nil {
                     self.loadedSizeGB = 0
                     self.ctxUsed = 0
                     self.metalOn = false
