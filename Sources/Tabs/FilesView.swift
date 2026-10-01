@@ -17,6 +17,8 @@ struct FilesView: View {
     @State private var showTerminal = false
     @State private var showNewFolder = false
     @State private var folderName = ""
+    @State private var showNewFile = false
+    @State private var fileName = ""
     @State private var showMove = false
     @State private var moveMode = 0     // 0 = 移动, 1 = 复制
     @State private var moveItem: RMFileEntry?
@@ -41,6 +43,18 @@ struct FilesView: View {
             Button("取消", role: .cancel) { folderName = "" }
         } message: {
             Text("直接写名字，会建在当前目录下")
+        }
+        .alert("新建文件", isPresented: $showNewFile) {
+            TextField("文件名（如 笔记.txt）", text: $fileName)
+            Button("创建并编辑") {
+                let n = fileName.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !n.isEmpty else { return }
+                fs.createFile(at: fs.path, name: n, text: "")
+                fileName = ""
+            }
+            Button("取消", role: .cancel) { fileName = "" }
+        } message: {
+            Text("会建在当前目录下，建完自动打开让你写。空着的文件名不会建。")
         }
         .onAppear { if fs.entries.isEmpty { fs.refresh() } }
         .toast(fs.message)
@@ -104,6 +118,8 @@ struct FilesView: View {
         HStack(spacing: 14) {
             Menu {
                 Button("上传文件") { showPicker = true }
+                // 不一定要上传：直接在这儿建新文件，建完立刻点开写
+                Button("新建文件") { showNewFile = true }
                 Button("新建文件夹") { showNewFolder = true }
             } label: {
                 Image(systemName: "plus")
