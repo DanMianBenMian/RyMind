@@ -206,10 +206,13 @@ struct ImageGenView: View {
             return
         }
         guard lock.acquire(.image) else { return }
-        running = true
-        note = ""
-        progress = 0.05
-        stage = "准备本地管线…"
+        // ⚠️ 这几个 @State 只能在主线程改：后台线程写 @State 会踩 SwiftUI 的独占访问，真·崩溃
+        DispatchQueue.main.async {
+            self.running = true
+            self.note = ""
+            self.progress = 0.05
+            self.stage = "准备本地管线…"
+        }
 
         let ref = reference
         let st = RMBitmap.Style.allCases[styleIdx]
@@ -217,32 +220,26 @@ struct ImageGenView: View {
         let sz = sizes[sizeIdx]
         let sd = seed
         let p = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let seq = results.count + 1
 
         DispatchQueue.global(qos: .userInitiated).async {
-            self.stage = ref == nil ? "生成噪声场…（0/3）" : "读取参考图…（0/3）"
-            self.progress = 0.25
-
+            // 计算全在后台，绝不碰 @State
             let img = RMBitmap.render(size: sz, seed: sd, style: st, paletteName: pal, referencing: ref)
+            let png = img.flatMap { $0.pngData() }
 
-            self.progress = 0.8
-            self.stage = "合成出图…（2/3）"
-            let out: UIImage? = img
-
-            self.progress = 1.0
-            self.stage = "完成"
             DispatchQueue.main.async {
                 self.running = false
                 self.progress = 0
-                if let out {
+                self.stage = ""
+                if let out = img {
                     self.results.insert(out, at: 0)
-                    // 顺手存进当前工作空间的 studio 目录
-                    if let d = out.pngData() {
-                        FileStore.shared.writeData(name: "studio/rmind-\(sd % 100000)-\(self.results.count).png", data: d)
+                    // 顺手存进工作空间的 studio 目录
+                    if let d = png {
+                        FileStore.shared.writeData(name: "studio/rmind-\(sd % 100000)-v\(seq).png", data: d)
                     }
                 } else {
-                    self.note = "这次没生成出来，换个种子或尺寸再试"
+                    self.note = "这次没生成出来：换个小一点的尺寸（384）或换个种子再试"
                 }
-                self.stage = ""
                 self.lock.release(.image)
             }
         }
