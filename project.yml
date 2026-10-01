@@ -16,8 +16,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
-        CFBundleShortVersionString: "0.4.1"
-        CFBundleVersion: "6"
+        CFBundleShortVersionString: "0.4.2"
+        CFBundleVersion: "7"
         LSRequiresIPhoneOS: true
         UIRequiredDeviceCapabilities:
           - arm64
