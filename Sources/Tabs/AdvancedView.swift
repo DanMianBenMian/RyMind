@@ -104,7 +104,7 @@ struct AdvancedView: View {
             }
 
             Section("预设（点了会同时把下面的滑条改掉）") {
-                ForEach(RMPreset.all, id: \.raw) { p in
+                ForEach(RMPreset.all) { p in
                     Button { applyPreset(p) } label: { presetRow(p.name, p.desc, current: isPreset(p)) }
                 }
             }
