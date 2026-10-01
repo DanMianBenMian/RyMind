@@ -423,17 +423,22 @@ struct TerminalView: View {
     private func runJS(_ source: String) {
         guard let ctx = JSContext() else { lines.append("JSContext 不可用"); return }
         var out: [String] = []
-        ctx.setObject({ (s: Any) -> Void in out.append(String(describing: s)) }, forKeyedSubscript: "emit")
+        // JSContext 的 key 必须是 NSCopying 对象，不能直接传 String
+        ctx.setObject({ (s: Any) -> Void in out.append(String(describing: s)) },
+                      forKeyedSubscript: NSString(string: "emitCb"))
+        ctx.setObject({ (p: String) -> [String] in self.fs.entries.map { $0.name } },
+                      forKeyedSubscript: NSString(string: "hostList"))
+        ctx.setObject({ (p: String) -> String in self.fs.readText(name: p) ?? "" },
+                      forKeyedSubscript: NSString(string: "hostRead"))
+        ctx.setObject({ (p: String, s: String) -> Bool in self.fs.writeText(name: p, text: s); return true },
+                      forKeyedSubscript: NSString(string: "hostWrite"))
         ctx.evaluateScript("""
-        var console = { log: function(){ emit(Array.prototype.slice.call(arguments).join(' ')); } };
-        function print(s){ emit(String(s)); }
-        function list(p){ try { return __list(p || '.'); } catch(e){ return []; } }
-        function read(p){ return __readFn(p); }
-        function write(p, s){ return __writeFn(p, String(s)); }
+        var console = { log: function(){ emitCb(Array.prototype.slice.call(arguments).join(' ')); } };
+        function print(s){ emitCb(String(s)); }
+        function list(p){ try { return hostList(p || '.'); } catch(e){ return []; } }
+        function read(p){ return hostRead(p); }
+        function write(p, s){ return hostWrite(p, String(s)); }
         """)
-        ctx.setObject({ (p: String) -> [String] in self.fs.entries.map { $0.name } }, forKeyedSubscript: "__list")
-        ctx.setObject({ (p: String) -> String in self.fs.readText(name: p) ?? "" }, forKeyedSubscript: "__readFn")
-        ctx.setObject({ (p: String, s: String) -> Bool in self.fs.writeText(name: p, text: s); return true }, forKeyedSubscript: "__writeFn")
         ctx.exceptionHandler = { _, ex in
             if let e = ex?.toString() { out.append("js error: " + e) }
         }
