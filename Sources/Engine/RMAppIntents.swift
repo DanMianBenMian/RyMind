@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import AppIntents
 
 /// 让 RyMind 的 3 个动作直接出现在 iOS「快捷指令」App 里（URL scheme 不会自动列出，必须靠 App Intents）。
