@@ -27,7 +27,7 @@ final class RyAppDelegate: NSObject, UIApplicationDelegate {
 struct RyMindApp: App {
     @UIApplicationDelegateAdaptor(RyAppDelegate.self) var appDelegate
     @StateObject private var taskLock = TaskLock()
-    @StateObject private var device = DeviceProfile()
+    @StateObject private var device = DeviceProfile.shared
     @ObservedObject private var trace = RMTrace.shared
 
     init() {
