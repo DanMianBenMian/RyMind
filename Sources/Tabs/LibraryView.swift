@@ -1,9 +1,10 @@
 import SwiftUI
 
+// ⚠️ 「文件」段已经移除：文件管理那页 bug 多又少用，不值得占一个入口。
+// 需要的时候还能从聊天里的附件卡片进到对应文件。
 enum LibSegment: String, CaseIterable, Identifiable {
     case models = "模型"
     case skills = "Skill"
-    case files  = "文件"
 
     var id: String { rawValue }
 }
@@ -35,20 +36,15 @@ struct LibraryView: View {
             .padding(.horizontal, 14)
             .padding(.bottom, 12)
 
-            if segment == .files {
-                FilesView()
-            } else {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        switch segment {
-                        case .models: modelList
-                        case .skills: skillList
-                        case .files:  EmptyView()
-                        }
+            ScrollView {
+                VStack(spacing: 8) {
+                    switch segment {
+                    case .models: modelList
+                    case .skills: skillList
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.bottom, 12)
                 }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 12)
             }
         }
         .background(RMTheme.bg)
@@ -65,15 +61,12 @@ struct LibraryView: View {
         HStack {
             Text("库").font(.system(size: 15, weight: .medium)).foregroundStyle(RMTheme.text)
             Spacer()
-            // 加号按段走：模型 = 加自定义模型；Skill = 上传 Skill 文件；文件段由文件页自己带 +
-            if segment != .files {
-                Button { addTapped() } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(RMTheme.accent)
-                        .frame(width: 26, height: 26)
-                        .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
-                }
+            Button { addTapped() } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(RMTheme.accent)
+                    .frame(width: 26, height: 26)
+                    .overlay(Circle().stroke(RMTheme.accent, lineWidth: 1))
             }
         }
         .padding(.horizontal, 14)
