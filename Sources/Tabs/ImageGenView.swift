@@ -28,6 +28,10 @@ struct ImageGenView: View {
     private var styleName: String { RMBitmap.Style.allCases[styleIdx].name }
     private var paletteName: String { RMBitmap.palettes.keys.sorted()[paletteIdx] }
 
+    /// 生图模型就绪 → 真·模型生图（stable-diffusion.cpp）；没下载 → 程序化涂鸦兜底
+    private var useModel: Bool { store.currentImage?.state == .ready }
+    private var modelName: String { store.currentImage?.label ?? "SD 1.5" }
+
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
@@ -143,13 +147,21 @@ struct ImageGenView: View {
                             .foregroundStyle(RMTheme.warn)
                     }
 
+                    // 模式状态：让用户知道这次跑的是真模型还是兜底涂鸦
+                    Text(useModel
+                         ? "模式：模型生图 · \(modelName) · 20 步 · 真扩散模型，\(sizes[sizeIdx] > 512 ? "768 太重自动降到 512" : "稍慢请耐心")"
+                         : "模式：程序化涂鸦（兜底）· 生图模型未下载，去「库 → 生图模型」下载 SD 1.5（1.6GB）")
+                        .font(.system(size: 10))
+                        .foregroundStyle(RMTheme.textSub)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
                     // 生成按钮
                     Button {
                         generate()
                     } label: {
                         HStack(spacing: 6) {
                             Image(systemName: running ? "stop.fill" : "wand.and.stars")
-                            Text(running ? "生成中…点停止" : "本地生成")
+                            Text(running ? "生成中…点停止" : (useModel ? "模型生成" : "本地生成"))
                                 .font(.system(size: 13, weight: .medium))
                         }
                         .frame(maxWidth: .infinity)
@@ -158,7 +170,8 @@ struct ImageGenView: View {
                         .background(running ? RMTheme.surface : RMTheme.accent)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
-                    .disabled(running)
+                    // ⚠️ 老版这里 .disabled(running)，生成中按钮点不动 → 「点停止」永远是死按钮。
+                    // 现在生成中点击 = 停止（generate() 里有 running 分支）。
 
                     // 出图结果
                     if !results.isEmpty {
@@ -205,7 +218,14 @@ struct ImageGenView: View {
 
     private func generate() {
         if running {
-            // 点停止：掐掉当前这张，界面立刻恢复
+            if useModel {
+                // 模型模式：让 sd 库内部安全取消，running 保持 true 等 onDone 收尾，
+                // 防止取消还没生效就又点「生成」开第二张（同一个 ctx 会乱）
+                RMSDEngine.shared.cancel()
+                note = "停止中…"
+                return
+            }
+            // 涂鸦模式：掐掉当前这张，界面立刻恢复
             cancelJob?.cancel()
             cancelJob = nil
             running = false
@@ -219,8 +239,6 @@ struct ImageGenView: View {
         let ref = reference
         let st = RMBitmap.Style.allCases[styleIdx]
         let pal = RMBitmap.palettes.keys.sorted()[paletteIdx]
-        let sz = sizes[sizeIdx]
-        let sd = seed
         let seq = results.count + 1
 
         let token = RMCancelToken()
@@ -231,13 +249,66 @@ struct ImageGenView: View {
         progress = 0.02
         stage = (reference != nil ? "读取参考图…" : "准备本地管线…")
 
+        if useModel {
+            generateWithModel(seq: seq, ref: ref)
+        } else {
+            generateProcedural(st: st, pal: pal, seq: seq, ref: ref, token: token)
+        }
+    }
+
+    // MARK: - 真·模型生图（stable-diffusion.cpp）
+
+    private func generateWithModel(seq: Int, ref: UIImage?) {
+        guard let m = store.currentImage, m.state == .ready else {
+            running = false; progress = 0; stage = ""
+            note = "生图模型未就绪"; lock.release(.image)
+            return
+        }
+        let sd = sizes[sizeIdx] > 512 ? 512 : sizes[sizeIdx]   // 768 在 4GB 设备太重，钉死 ≤512
+        // ⚠️ 内存纪律：聊天模型必须先卸载（两者不能同时进内存）；聊天页发消息会自动重新加载
+        LlamaEngine.shared.unload()
+        RMTrace.shared.log("生图(模型)开始 model=\(m.id) size=\(sd) ref=\(ref != nil) seed=\(seed)", tag: "image")
+
+        RMSDEngine.shared.generate(
+            modelPath: store.localPath(for: m),
+            prompt: prompt,
+            negative: "blurry, low quality, watermark, text, deformed",
+            reference: ref,
+            size: sd, steps: 20, cfg: 7.0, seed: seed,
+            onProgress: { p, s in
+                self.progress = p
+                self.stage = s
+            },
+            onDone: { img, err in
+                self.running = false
+                self.progress = 0
+                self.stage = ""
+                if let img {
+                    self.results.insert(RMPic(img: img), at: 0)
+                    if self.results.count > 6 { self.results.removeLast() }
+                    if let d = img.pngData() {
+                        FileStore.shared.writeData(name: "studio/rmind-\(self.seed % 100000)-v\(seq).png", data: d)
+                    }
+                    self.seed = UInt64(Date().timeIntervalSince1970)   // 下张换种子，别连出一样的
+                } else {
+                    self.note = err
+                }
+                self.lock.release(.image)
+            })
+    }
+
+    // MARK: - 程序化涂鸦（兜底，模型没下载时）
+
+    private func generateProcedural(st: RMBitmap.Style, pal: String, seq: Int, ref: UIImage?, token: RMCancelToken) {
+        let sz = sizes[sizeIdx]
+        let sd = seed
+
         let job = RMPixelJob(opt: RMPixelJob.Opt(size: sz, seed: sd, style: st,
                                                  paletteName: pal, reference: ref))
         RMTrace.shared.log("生图开始 size=\(sz) style=\(st) pal=\(pal) ref=\(ref != nil) seed=\(sd)", tag: "image")
         DispatchQueue.global(qos: .userInitiated).async {
             var finished: UIImage? = nil
             var ticks = 0
-            var stepErr = ""
             // 分片出图：算一小片 → 回报一次进度 → 让出一次线程（界面不会像卡死，也随时能停）
             while job.step(rows: 8) {
                 if token.isCancelled { break }
@@ -252,7 +323,7 @@ struct ImageGenView: View {
                 Thread.sleep(forTimeInterval: 0.012)
             }
             // 崩过 3 次的活儿：每一步都留痕，真崩了至少知道死在 step 还是 makeImage
-            RMTrace.shared.log("像素循环结束 ticks=\(ticks) cancelled=\(token.isCancelled) err=\(stepErr)", tag: "image")
+            RMTrace.shared.log("像素循环结束 ticks=\(ticks) cancelled=\(token.isCancelled)", tag: "image")
             if !token.isCancelled {
                 finished = job.makeImage()
                 RMTrace.shared.log("makeImage 完成 img=\(finished != nil)", tag: "image")
