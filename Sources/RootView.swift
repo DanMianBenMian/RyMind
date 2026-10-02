@@ -23,6 +23,7 @@ enum RMTab: String, CaseIterable, Identifiable {
 
 struct RootView: View {
     @EnvironmentObject private var lock: TaskLock
+    @EnvironmentObject private var shortcuts: RMShortcuts
     @State private var tab: RMTab = .chat
 
     var body: some View {
@@ -41,6 +42,11 @@ struct RootView: View {
                         BottomBar(tab: $tab)
                     }
                 }
+                // 快捷指令浮层（rymind:// 打开时显示结果 / 生成中）
+                if !shortcuts.banner.isEmpty || shortcuts.isBusy {
+                    shortcutBanner
+                        .allowsHitTesting(false)
+                }
             }
         }
         .alert("无法同时进行", isPresented: Binding(
@@ -51,6 +57,28 @@ struct RootView: View {
         } message: {
             Text(lock.alertMessage ?? "")
         }
+    }
+
+    private var shortcutBanner: some View {
+        VStack(spacing: 6) {
+            if shortcuts.isBusy {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: RMTheme.accent))
+            }
+            Text(shortcuts.banner.isEmpty ? "正在生成…（别切走 App）" : shortcuts.banner)
+                .font(.system(size: 12))
+                .foregroundStyle(RMTheme.text)
+                .multilineTextAlignment(.center)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 10)
+        .background(RMTheme.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+            .stroke(RMTheme.accent.opacity(0.55), lineWidth: 1))
+        .padding(.top, 10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .transition(.move(edge: .top).combined(with: .opacity))
     }
 
     @ViewBuilder
