@@ -656,19 +656,29 @@ struct ChatView: View {
 
         // Max = **真的高强度思考**：换更大一档的推理窗口（装得下更长历史 + 更长的推理链），
         // 同时放宽输出上限，让模型能把推理写完，不再一刀切 512 就掐断。
-        let ctxTokens = maxMode ? device.tier.maxCtxTokens : device.tier.ctxTokens
+        // 上下文长度**不跟着性能档位走**：性能调节（内存预算 / GPU 层数 / 线程）只管跑得快不快；
+        // 上下文 = min(你设的上限, 模型自身支持, 这台设备内存装得下)。
+        let wantCtx   = maxMode ? device.maxCtxCapTokens : device.ctxCapTokens
+        let ctxTokens = device.resolveContext(weightGB: m.sizeGB, requested: wantCtx)
         let gpu = device.metalEnabled ? device.tier.gpuLayers : 0
         RMTrace.shared.log("生成 model=\(m.name) ctx=\(ctxTokens) gpu=\(gpu) max=\(maxMode) history=\(history.count) promptChars=\(finalPrompt.count)", tag: "chat")
 
         DispatchQueue.global(qos: .userInitiated).async {
-            let ok = LlamaEngine.shared.load(modelId: m.id,
-                                             path: store.localPath(for: m),
-                                             ctxTokens: ctxTokens,
-                                             gpuLayers: gpu,
-                                             sizeGB: m.sizeGB)
-            if !ok {
+            // ⚠️ 加载 / 解码都可能踩到越界或内存（4GB iPad 上小模型也常炸）。
+            // 用 RMGuard 把信号接住，至少给一句人话，别直接闪退。
+            var loadOK = false
+            let guardA = RMGuard.run {
+                loadOK = LlamaEngine.shared.load(modelId: m.id,
+                                                 path: store.localPath(for: m),
+                                                 ctxTokens: ctxTokens,
+                                                 gpuLayers: gpu,
+                                                 sizeGB: m.sizeGB)
+            }
+            if !guardA || !loadOK {
+                RMTrace.shared.log("模型加载失败 guard=\(!guardA ? "崩溃被接住" : "返回失败") ctx=\(ctxTokens) gpu=\(gpu)",
+                                   tag: "crash")
                 DispatchQueue.main.async {
-                    sessions.replace(id: botId, with: "（模型没找到：去「库 → 模型」下载 \(m.name) 再试）")
+                    sessions.replace(id: botId, with: "（这个模型没加载起来：内存不够或文件损坏。\n去「性能」页把内存预算调小、或关掉 Metal 再试；也可以在「库」里删掉重下 \(m.name)）")
                     statusLine = "模型未就绪"
                     lock.release(.chat)
                 }
@@ -701,7 +711,9 @@ struct ChatView: View {
             }
 
         var acc = ""
-        let produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: finalPrompt,
+        var produced = ""
+        let guardB = RMGuard.run {
+            produced = LlamaEngine.shared.generate(brandHint: m.id, system: sys, prompt: finalPrompt,
                                                    history: history,
                                                    maxTokensOverride: maxMode ? 2048 : nil) { piece in
                 acc += piece
@@ -711,10 +723,15 @@ struct ChatView: View {
                 let snap = acc
                 DispatchQueue.main.async { sessions.replace(id: botId, with: snap) }
             }
+        }
+        if !guardB {
+            RMTrace.shared.log("生成过程崩溃被兜底接住（多半是内存），ctx=\(ctxTokens) gpu=\(gpu)", tag: "crash")
+        }
+        let producedText = guardB ? produced : ""
 
-            DispatchQueue.main.async {
-                var final = produced
-                if final.isEmpty { final = "（这次没吐出东西，换个问题或换个模型试试；可在「高级」页把输出长度调大）" }
+        DispatchQueue.main.async {
+            var final = producedText
+            if final.isEmpty { final = "（这次没吐出东西，换个问题或换个模型试试；可在「高级」页把输出长度调大）" }
                 sessions.replace(id: botId, with: final)
                 device.usedGB = device.footprintGB
                 statusLine = ""
