@@ -25,7 +25,7 @@ enum RMGuard {
             ptr.bindMemory(to: (() -> Void).self, capacity: 1).pointee()
         }
         let tripped = rm_guard_call(fn, box)
-        box.deinitialize()
+        box.deinitialize(count: 1)
         box.deallocate()
         return tripped == 0
     }
