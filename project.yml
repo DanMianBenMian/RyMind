@@ -16,8 +16,8 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
-        CFBundleShortVersionString: "0.4.6"
-        CFBundleVersion: "11"
+        CFBundleShortVersionString: "0.4.7"
+        CFBundleVersion: "12"
         LSRequiresIPhoneOS: true
         UIRequiredDeviceCapabilities:
           - arm64
@@ -37,8 +37,9 @@ targets:
       PROVISIONING_PROFILE_SPECIFIER: ""
       INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
       ENABLE_BITCODE: NO
-      # ---- llama.cpp（workflow 里 cmake 编好的 iOS 静态库 + 头文件）----
+      # ---- llama.cpp + stable-diffusion.cpp（workflow 里 cmake 编好的 iOS 静态库 + 头文件）----
       SWIFT_OBJC_BRIDGING_HEADER: Sources/Bridge/RyMind-Bridging-Header.h
-      HEADER_SEARCH_PATHS: $(PROJECT_DIR)/llama-include
-      LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/llama-libs
-      OTHER_LDFLAGS: -lllama -lggml -lggml-base -lggml-cpu -lggml-metal -lz -lc++ -framework Accelerate -framework Metal -framework MetalKit
+      HEADER_SEARCH_PATHS: $(PROJECT_DIR)/llama-include $(PROJECT_DIR)/sd-include
+      LIBRARY_SEARCH_PATHS: $(PROJECT_DIR)/llama-libs $(PROJECT_DIR)/sd-libs
+      # ggml 系列只用 llama-libs 里那份（最新），libstable-diffusion.a 挂到它上面跑
+      OTHER_LDFLAGS: -lllama -lstable-diffusion -lggml -lggml-base -lggml-cpu -lggml-metal -lz -lc++ -framework Accelerate -framework Metal -framework MetalKit -framework CoreVideo -framework Foundation
