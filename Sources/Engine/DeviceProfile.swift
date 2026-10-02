@@ -2,6 +2,9 @@ import Foundation
 
 /// 设备内存画像与推理档位。iOS 设备内存 4~24GB 不等，所有推理参数按预算自适应。
 final class DeviceProfile: ObservableObject {
+    /// 全局单例：非 SwiftUI 视图的代码（引擎、快捷指令）也读同一份预算配置，
+    /// 且和 App 注入到视图树的 @EnvironmentObject 是同一个实例，改了预算两边一致。
+    static let shared = DeviceProfile()
 
     enum Tier: String {
         case tiny, small, mid, large, xlarge
