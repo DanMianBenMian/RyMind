@@ -7,6 +7,20 @@ final class RyAppDelegate: NSObject, UIApplicationDelegate {
                      completionHandler: @escaping () -> Void) {
         ModelDownloader.shared.backgroundCompletionHandler = completionHandler
     }
+
+    /// 快捷指令入口（rymind://models / rymind://chat / rymind://newchat）：
+    /// 存下来，等 Window 起来、didBecomeActive 再执行 —— 冷启动时这里直接跑可能还没界面。
+    func application(_ application: UIApplication, open url: URL,
+                     options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
+        RMShortcuts.pendingURL = url
+        return true
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        guard let u = RMShortcuts.pendingURL else { return }
+        RMShortcuts.pendingURL = nil
+        RMShortcuts.shared.handle(u)
+    }
 }
 
 @main
@@ -36,6 +50,7 @@ struct RyMindApp: App {
                 .environmentObject(LlamaEngine.shared)
                 .environmentObject(SkillStore.shared)
                 .environmentObject(FileStore.shared)
+                .environmentObject(RMShortcuts.shared)
                 .preferredColorScheme(.dark)
         }
     }
