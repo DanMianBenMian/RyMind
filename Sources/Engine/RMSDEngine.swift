@@ -38,12 +38,25 @@ final class RMSDEngine {
 
     /// 按内存预算推导生图的安全参数（预算越小 → 尺寸/步数越保守）。
     /// 分辨率²决定 UNet 激活内存（峰值的最大来源），所以预算紧时先砍尺寸；步数影响单图耗时、不影响峰值。
+    /// 按内存预算推导生图的安全参数（预算越小 → 尺寸/步数越保守）。
+    /// ⚠️ 设备物理内存硬上限：4GB 的 iPad（iPad 10）即使「性能」页预算拉满也绝不超 384²——
+    /// 512² 的 UNet 激活峰值在 4GB 上必顶穿内存被 jetsam（SIGKILL，任何信号兜底都救不了），
+    /// 这正是「内存预算拉低了还崩」的真凶：默认预算 2.6GB 就落在 512² 档。
     static func sdPlan(budgetGB: Double) -> SDPlan {
-        if budgetGB >= 3.2 { return SDPlan(maxSize: 512, maxSteps: 20, note: "") }
-        if budgetGB >= 2.4 { return SDPlan(maxSize: 512, maxSteps: 14, note: "（内存偏紧，步数已自动降到 14）") }
-        if budgetGB >= 1.8 { return SDPlan(maxSize: 384, maxSteps: 12, note: "（内存紧，已降到 384 尺寸 / 12 步）") }
-        if budgetGB >= 1.3 { return SDPlan(maxSize: 384, maxSteps: 8,  note: "（内存很紧，已降到 384 尺寸 / 8 步）") }
-        return SDPlan(maxSize: 320, maxSteps: 6, note: "（内存极紧，已降到 320 尺寸 / 6 步，画质会下降）")
+        let total = DeviceProfile.shared.totalGB
+        let hardCap: Int = total <= 4.5 ? 384 : (total <= 6.5 ? 448 : 512)
+        let base: (size: Int, steps: Int, note: String)
+        if budgetGB >= 3.2 { base = (512, 20, "") }
+        else if budgetGB >= 2.4 { base = (512, 14, "（内存偏紧，步数已自动降到 14）") }
+        else if budgetGB >= 1.8 { base = (384, 12, "（内存紧，已降到 384 尺寸 / 12 步）") }
+        else if budgetGB >= 1.3 { base = (384, 8,  "（内存很紧，已降到 384 尺寸 / 8 步）") }
+        else { base = (320, 6, "（内存极紧，已降到 320 尺寸 / 6 步，画质会下降）") }
+        let maxSize = min(base.size, hardCap)
+        var note = base.note
+        if maxSize != base.size {
+            note = "（设备内存有限，尺寸已锁 \(maxSize)² 防崩溃）"
+        }
+        return SDPlan(maxSize: maxSize, maxSteps: base.steps, note: note)
     }
 
     /// 当前进程真实物理内存（GB）—— 生图前预检用，避免明知道快顶穿还硬跑
@@ -106,7 +119,7 @@ final class RMSDEngine {
         let budget = DeviceProfile.shared.budgetGB
         let plan = Self.sdPlan(budgetGB: budget)
         // ⚠️ 预检：当前已经吃到预算 85% 以上，硬跑大概率被 jetsam 杀 → 直接拒，给人话
-        if budget > 0, Self.footprintGB > budget * 0.85 {
+        if budget > 0, Self.footprintGB > budget * 0.70 {
             RMTrace.shared.log("SD 预检不过：footprint=\(String(format: "%.2f", Self.footprintGB))GB 已超预算 \(String(format: "%.2f", budget))GB 的 85%",
                                tag: "image")
             DispatchQueue.main.async {
