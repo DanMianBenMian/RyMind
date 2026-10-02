@@ -77,9 +77,8 @@ final class RMSDEngine {
             // ⚠️ strdup 出来的 C 字符串必须活过 new_sd_ctx()，withCString 的作用域指针会悬垂
             let cPath = strdup(modelPath)!
             defer { free(cPath) }
-            cp.model_path = cPath
+            cp.model_path = UnsafePointer(cPath)
             cp.n_threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount)))
-            cp.vae_tiling_params.enabled = true   // VAE 分块解码：512² 峰值内存小一大截
             guard let c = new_sd_ctx(&cp) else {
                 RMTrace.shared.log("SD new_sd_ctx 失败（内存不够 / 文件坏）", tag: "image")
                 DispatchQueue.main.async {
@@ -102,8 +101,8 @@ final class RMSDEngine {
         let cPrompt = strdup(prompt.isEmpty ? "a beautiful painting, soft light" : prompt)!
         let cNeg = strdup(negative)!
         defer { free(cPrompt); free(cNeg) }
-        gp.prompt = cPrompt
-        gp.negative_prompt = cNeg
+        gp.prompt = UnsafePointer(cPrompt)
+        gp.negative_prompt = UnsafePointer(cNeg)
         gp.width = Int32(size)
         gp.height = Int32(size)
         gp.batch_count = 1
@@ -111,6 +110,7 @@ final class RMSDEngine {
         gp.sample_params.sample_steps = Int32(steps)
         gp.sample_params.sample_method = EULER_A_SAMPLE_METHOD
         gp.sample_params.guidance.txt_cfg = cfg
+        gp.vae_tiling_params.enabled = true   // VAE 分块解码：512² 峰值内存小一大截
 
         // img2img：参考图编码成 RGBA 塞进 init_image
         var initMem: UnsafeMutableRawPointer?
