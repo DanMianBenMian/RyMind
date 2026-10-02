@@ -116,7 +116,8 @@ struct PerfView: View {
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(RMTheme.text)
             infoRow("量化", device.tier.quant)
-            infoRow("实际上下文", "\(device.tier.ctxTokens / 1024)k")
+            // 上下文长度不跟性能档位走：这里只报档位默认值，真生效值在「高级」页调
+            infoRow("上下文（档位默认）", "\(device.tier.defaultCtxTokens / 1024)k")
             infoRow("KV 量化", device.tier.kvQuant ? "开（省内存）" : "关")
             infoRow("Metal 层数", "\(device.tier.gpuLayers)")
             infoRow("关键词筛推理", device.tier.requiresKeywordFilter ? "强制开启" : "按需")
