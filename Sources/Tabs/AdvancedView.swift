@@ -8,17 +8,24 @@ struct AdvancedView: View {
 
     @State private var copyTip = ""
 
+    @EnvironmentObject private var store: ModelStore
+
     @State private var temp: Double
     @State private var pen: Double
     @State private var topP: Double
     @State private var maxTok: Double
+    @State private var ctxCap: Double
+    @State private var maxCap: Double
 
     init() {
         let s = RMSampleStore.load()
+        let dev = DeviceProfile()
         _temp = State(initialValue: Double(s.temperature))
         _pen  = State(initialValue: Double(s.repeatPenalty))
         _topP = State(initialValue: Double(s.topP))
         _maxTok = State(initialValue: Double(s.maxTokens))
+        _ctxCap = State(initialValue: Double(min(max(dev.ctxCapTokens, 512), 32768)))
+        _maxCap = State(initialValue: Double(min(max(dev.maxCtxCapTokens, 512), 32768)))
     }
 
     var body: some View {
@@ -99,6 +106,28 @@ struct AdvancedView: View {
                     .foregroundStyle(RMTheme.textSub)
             }
 
+            Section("上下文长度（不跟性能档位走）") {
+                Text("上下文 = min(你设的上限, 模型文件支持的上限, 这台设备内存装得下)。「性能」页调的内存 / GPU 层数 / 线程数只管跑得多快，不牵连这里；装不下时会自动压到能装的最大。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(RMTheme.textSub)
+                Slider(value: $ctxCap, in: 1024...32768, step: 1024)
+                    .tint(RMTheme.accent)
+                    .onChange(of: ctxCap) { _ in
+                        device.ctxCapTokens = Int(ctxCap)
+                    }
+                Text("普通模式 \(Int(ctxCap)) token" + ceilingNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(RMTheme.textSub)
+                Slider(value: $maxCap, in: 1024...65536, step: 1024)
+                    .tint(RMTheme.accent)
+                    .onChange(of: maxCap) { _ in
+                        device.maxCtxCapTokens = Int(maxCap)
+                    }
+                Text("Max 模式（会话页那个开关）\(Int(maxCap)) token" + ceilingNote)
+                    .font(.system(size: 11))
+                    .foregroundStyle(RMTheme.textSub)
+            }
+
             Section("Metal / GPU 加速（关掉就走纯 CPU，省电省内存但会慢）") {
                 Toggle("Metal 加速", isOn: $device.metalEnabled)
                     .tint(RMTheme.accent)
@@ -157,6 +186,14 @@ struct AdvancedView: View {
         }
         .background(RMTheme.bg)
         .navigationTitle("高级")
+    }
+
+    /// 当前模型在这台设备上「内存装得下」的上下文天花板，用来给上面的滑条加注脚
+    private var ceilingNote: String {
+        let m = store.llmModels.first { $0.id == store.currentLLMId }
+        let w = m?.sizeGB ?? 1.0
+        let c = DeviceProfile().memoryContextCeiling(weightGB: w)
+        return "（\(m?.name ?? "当前模型") 这台设备最多撑到 \(max(512, c)) token）"
     }
 
     private func isPreset(_ p: RMPreset) -> Bool {
