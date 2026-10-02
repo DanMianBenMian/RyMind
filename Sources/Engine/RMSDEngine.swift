@@ -39,6 +39,8 @@ final class RMSDEngine {
     // MARK: - 进度回调（C 全局回调 → 静态路由 → 主线程）
 
     fileprivate static var activeStep: ((Int, Int) -> Void)?
+    /// 上一次回报过的步数（去重用，避免每步都往主线程推）
+    private static var lastReportedStep = -1
 
     private static let cProgress: @convention(c) (Int32, Int32, Float, UnsafeMutableRawPointer?) -> Void = { step, steps, _, _ in
         let s = Int(step), n = Int(steps)
@@ -78,9 +80,12 @@ final class RMSDEngine {
             let cPath = strdup(modelPath)!
             defer { free(cPath) }
             cp.model_path = UnsafePointer(cPath)
-            cp.n_threads = Int32(max(2, min(6, ProcessInfo.processInfo.activeProcessorCount)))
-            guard let c = new_sd_ctx(&cp) else {
-                RMTrace.shared.log("SD new_sd_ctx 失败（内存不够 / 文件坏）", tag: "image")
+            // 4GB 设备上加载阶段也可能直接顶穿内存，同样兜住
+            cp.n_threads = Int32(max(2, min(4, ProcessInfo.processInfo.activeProcessorCount)))
+            var newCtx: OpaquePointer? = nil
+            let loaded = RMGuard.run { newCtx = new_sd_ctx(&cp) }
+            guard let c = loaded ? newCtx : nil else {
+                RMTrace.shared.log("SD new_sd_ctx 失败 loaded=\(loaded)（内存不够 / 文件坏）", tag: "image")
                 DispatchQueue.main.async {
                     onDone(nil, "模型加载失败：内存不够或文件损坏；去「库」删掉重下，或先关掉别的模型")
                 }
@@ -125,17 +130,32 @@ final class RMSDEngine {
         defer { if let m = initMem { free(m) } }
 
         // ---- 3) 进度挂钩 + 生成 ----
+        // ⚠️ 进度回调在 C 的推理线程上跑，onProgress 会写 SwiftUI @State —— 必须回主线程，
+        // 而且每步都 dispatch 会把主线程刷爆（进度条一闪一闪就是这么来的），这里只在步数变了才报。
+        Self.lastReportedStep = -1
         Self.activeStep = { step, total in
-            let frac = Double(step) / Double(total)
-            onProgress(0.05 + 0.9 * frac, "扩散去噪 \(step)/\(total) 步…")
+            guard total > 0, step != Self.lastReportedStep else { return }
+            Self.lastReportedStep = step
+            let frac = Double(max(0, step)) / Double(total)
+            let text = "扩散去噪 \(step)/\(total) 步…"
+            DispatchQueue.main.async { onProgress(0.05 + 0.9 * frac, text) }
         }
         defer { Self.activeStep = nil }
 
         var images: UnsafeMutablePointer<sd_image_t>? = nil
         var count: Int32 = 0
         let t1 = Date()
-        let ok = generate_image(sdCtx, &gp, &images, &count)
+        // ⚠️ 4GB 的 iPad 上 512² 去噪 peaked 内存很容易顶穿，直接 SIGSEGV 把 App 带走。
+        // 用 RMGuard 把信号接住，至少给一句人话 + trace 留证。
+        var ranOK = false
+        let survived = RMGuard.run {
+            ranOK = generate_image(sdCtx, &gp, &images, &count)
+        }
+        let ok = survived && ranOK
         let dt = Date().timeIntervalSince(t1)
+        if !survived {
+            RMTrace.shared.log("SD generate_image 崩溃被兜底接住（内存/越界）信号=\(rm_guard_signal())，用时=\(Int(dt))s", tag: "crash")
+        }
         RMTrace.shared.log("SD generate_image ok=\(ok) n=\(count) 用时=\(Int(dt))s", tag: "image")
 
         // ---- 4) 取结果（⚠️ sd.cpp 约定：结果内存由调用方 free）----
@@ -152,13 +172,20 @@ final class RMSDEngine {
             free(images)
         }
 
-        DispatchQueue.main.async {
-            if let out {
-                onDone(out, "")
-            } else {
-                onDone(nil, "这次没生成出来：可能被停止，或内存吃紧；试试 384 尺寸或重新生成")
-            }
+        if let out {
+            DispatchQueue.main.async { onDone(out, "") }
+            return
         }
+        // 没出图：C 那边多半已经踩坏了自己，ctx 留着只会下次更糟 —— 扔掉重建
+        let msg: String
+        if survived {
+            msg = "这次没生成出来：可能被停止了，或者内存吃紧（多试两次；换 384 尺寸会稳很多）"
+        } else {
+            unload()
+            msg = "生成时崩了（多半是内存不够）：换 384 尺寸 / 12 步再试；去「性能」页把内存预算调小或关掉 Metal"
+        }
+        RMTrace.shared.log("SD 出图失败 survived=\(survived) ranOK=\(ranOK)", tag: "image")
+        DispatchQueue.main.async { onDone(nil, msg) }
     }
 
     // MARK: - 像素工具
