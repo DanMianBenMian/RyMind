@@ -25,6 +25,39 @@ final class RMSDEngine {
 
     var isLoaded: Bool { ctx != nil }
 
+    // MARK: - 内存预算 → 生图安全参数（这才是「性能页内存预算」真正生效的地方）
+
+    /// ⚠️ 关键纪律：iOS 的「内存超限」是 jetsam，发的是 **SIGKILL**，任何 signal handler 都拦不住
+    /// （RMGuard 救不了这种崩）。所以唯一正路是**从源头把峰值内存压在预算内**，而不是崩了再兜底。
+    /// 这个预算来自「性能」页的内存分配滑块（`DeviceProfile.budgetGB`），它会**真限制**生图工作负载。
+    struct SDPlan {
+        let maxSize: Int
+        let maxSteps: Int
+        let note: String
+    }
+
+    /// 按内存预算推导生图的安全参数（预算越小 → 尺寸/步数越保守）。
+    /// 分辨率²决定 UNet 激活内存（峰值的最大来源），所以预算紧时先砍尺寸；步数影响单图耗时、不影响峰值。
+    static func sdPlan(budgetGB: Double) -> SDPlan {
+        if budgetGB >= 3.2 { return SDPlan(maxSize: 512, maxSteps: 20, note: "") }
+        if budgetGB >= 2.4 { return SDPlan(maxSize: 512, maxSteps: 14, note: "（内存偏紧，步数已自动降到 14）") }
+        if budgetGB >= 1.8 { return SDPlan(maxSize: 384, maxSteps: 12, note: "（内存紧，已降到 384 尺寸 / 12 步）") }
+        if budgetGB >= 1.3 { return SDPlan(maxSize: 384, maxSteps: 8,  note: "（内存很紧，已降到 384 尺寸 / 8 步）") }
+        return SDPlan(maxSize: 320, maxSteps: 6, note: "（内存极紧，已降到 320 尺寸 / 6 步，画质会下降）")
+    }
+
+    /// 当前进程真实物理内存（GB）—— 生图前预检用，避免明知道快顶穿还硬跑
+    private static var footprintGB: Double {
+        var info = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / 4)
+        let kr = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        return kr == KERN_SUCCESS ? Double(info.resident_size) / 1_073_741_824.0 : 0
+    }
+
     func cancel() {
         guard let ctx else { return }
         sd_cancel_generation(ctx, SD_CANCEL_ALL)
@@ -69,6 +102,25 @@ final class RMSDEngine {
                            onDone: @escaping (UIImage?, String) -> Void) {
         DispatchQueue.main.async { onProgress(0.02, "准备管线…") }
 
+        // ---- 0) 内存预算硬限制（「性能」页滑块在这里真正生效）----
+        let budget = DeviceProfile.shared.budgetGB
+        let plan = Self.sdPlan(budgetGB: budget)
+        // ⚠️ 预检：当前已经吃到预算 85% 以上，硬跑大概率被 jetsam 杀 → 直接拒，给人话
+        if budget > 0, Self.footprintGB > budget * 0.85 {
+            RMTrace.shared.log("SD 预检不过：footprint=\(String(format: "%.2f", Self.footprintGB))GB 已超预算 \(String(format: "%.2f", budget))GB 的 85%",
+                               tag: "image")
+            DispatchQueue.main.async {
+                onDone(nil, "内存已经很吃紧（约 \(String(format: "%.1f", Self.footprintGB))GB / 预算 \(String(format: "%.1f", budget))GB），先回主屏清一下后台应用再生成")
+            }
+            return
+        }
+        let safeSize  = min(size, plan.maxSize)
+        let safeSteps = min(steps, plan.maxSteps)
+        if safeSize != size || safeSteps != steps {
+            RMTrace.shared.log("SD 按内存预算夹参数 size \(size)→\(safeSize) steps \(steps)→\(safeSteps)（预算 \(String(format: "%.1f", budget))GB）",
+                               tag: "image")
+        }
+
         // ---- 1) 上下文（换模型文件才重建）----
         if ctx != nil, loadedPath != modelPath { unload() }
         if ctx == nil {
@@ -108,11 +160,11 @@ final class RMSDEngine {
         defer { free(cPrompt); free(cNeg) }
         gp.prompt = UnsafePointer(cPrompt)
         gp.negative_prompt = UnsafePointer(cNeg)
-        gp.width = Int32(size)
-        gp.height = Int32(size)
+        gp.width = Int32(safeSize)
+        gp.height = Int32(safeSize)
         gp.batch_count = 1
         gp.seed = seed == 0 ? -1 : Int64(bitPattern: seed)   // -1 = 让库自己随机
-        gp.sample_params.sample_steps = Int32(steps)
+        gp.sample_params.sample_steps = Int32(safeSteps)
         gp.sample_params.sample_method = EULER_A_SAMPLE_METHOD
         gp.sample_params.guidance.txt_cfg = cfg
         gp.vae_tiling_params.enabled = true   // VAE 分块解码：512² 峰值内存小一大截
@@ -120,8 +172,8 @@ final class RMSDEngine {
         // img2img：参考图编码成 RGBA 塞进 init_image
         var initMem: UnsafeMutableRawPointer?
         if let ref = reference {
-            initMem = malloc(size * size * 4)
-            if let mem = initMem, let im = Self.rgbaImage(from: ref, size: size, buffer: mem) {
+            initMem = malloc(safeSize * safeSize * 4)
+            if let mem = initMem, let im = Self.rgbaImage(from: ref, size: safeSize, buffer: mem) {
                 gp.init_image = im
                 gp.strength = 0.65
                 RMTrace.shared.log("SD img2img 模式 strength=0.65", tag: "image")
@@ -179,10 +231,10 @@ final class RMSDEngine {
         // 没出图：C 那边多半已经踩坏了自己，ctx 留着只会下次更糟 —— 扔掉重建
         let msg: String
         if survived {
-            msg = "这次没生成出来：可能被停止了，或者内存吃紧（多试两次；换 384 尺寸会稳很多）"
+            msg = "这次没生成出来：可能被停止了，或者内存吃紧（多试两次；去「性能」页把内存预算调小、会自动降到更小尺寸更稳）"
         } else {
             unload()
-            msg = "生成时崩了（多半是内存不够）：换 384 尺寸 / 12 步再试；去「性能」页把内存预算调小或关掉 Metal"
+            msg = "生成时崩了（多半是内存不够）：去「性能」页把内存预算调小，会自动降到 384/320 尺寸更稳；或先回主屏清掉后台应用"
         }
         RMTrace.shared.log("SD 出图失败 survived=\(survived) ranOK=\(ranOK)", tag: "image")
         DispatchQueue.main.async { onDone(nil, msg) }
