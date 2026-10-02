@@ -70,15 +70,17 @@ final class ModelStore: ObservableObject {
                 quant: "Q4_K_M", sizeGB: 16.0, state: .notDownloaded, isMoE: true,
                 primaryURL: nil, mirrorURL: ""),
 
-        // ---- 生图（Core ML）----
-        RMModel(id: "sd15-q6", name: "Stable Diffusion 1.5", brand: "SD", kind: .image,
-                quant: "Q6", sizeGB: 1.3, state: .ready, primaryURL: nil, mirrorURL: ""),
+        // ---- 生图（stable-diffusion.cpp · GGUF · Metal）----
+        // SD 1.5 Q4_0（second-state 量化，含 CLIP+VAE 单文件），hf-mirror 可直下
+        RMModel(id: "sd15-q4", name: "Stable Diffusion 1.5 生图", brand: "SD", kind: .image,
+                quant: "Q4_0", sizeGB: 1.6, state: .notDownloaded, primaryURL: nil,
+                mirrorURL: "https://hf-mirror.com/second-state/stable-diffusion-v1-5-GGUF/resolve/main/stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf"),
         RMModel(id: "sdxl-q6", name: "SDXL (轻量)", brand: "SD", kind: .image,
                 quant: "Q6", sizeGB: 2.4, state: .notDownloaded, primaryURL: nil, mirrorURL: "")
     ]
 
     @Published var currentLLMId: String   = "qwen25-15b"
-    @Published var currentImageId: String = "sd15-q6"
+    @Published var currentImageId: String = "sd15-q4"
 
     private init() { refreshStates() }
 
@@ -106,10 +108,10 @@ final class ModelStore: ObservableObject {
         return (docs as NSString).appendingPathComponent("Models/\(m.id).gguf")
     }
 
-    /// 按本地文件是否存在刷新状态（LLM 看 gguf 是否落地）
+    /// 按本地文件是否存在刷新状态（LLM 与生图模型都看 gguf 是否落地）
     func refreshStates() {
         for i in models.indices {
-            guard models[i].kind == .llm else { continue }
+            guard models[i].kind == .llm || models[i].kind == .image else { continue }
             let exists = FileManager.default.fileExists(atPath: localPath(for: models[i]))
             if exists {
                 models[i].state = .ready
