@@ -17,8 +17,11 @@ final class DeviceProfile: ObservableObject {
             }
         }
 
-        /// 实际送进模型的上下文长度（不是存档容量）
-        var ctxTokens: Int {
+        /// 上下文长度的**默认值**（不是天花板）。
+        /// ⚠️ 它不再和 GPU 层数 / 线程 / 批次那样跟着性能档位走 ——
+        /// 性能调节（能上几层 Metal、开几个线程、划多少内存）只影响跑得快不快，
+        /// 上下文长度由「你设的上限」和「这台设备装得下」两个条件决定，见 resolveContext()。
+        var defaultCtxTokens: Int {
             switch self {
             case .tiny:   return 4096
             case .small:  return 8192
@@ -28,9 +31,8 @@ final class DeviceProfile: ObservableObject {
             }
         }
 
-        /// Max 模式下实际送进模型的上下文（比默认大一档，用来"高强度思考"：
-        /// 装得下更长历史和更长的推理链）。受内存预算硬顶，不会无限涨。
-        var maxCtxTokens: Int {
+        /// Max 模式的默认窗口（比普通大一档，用来"高强度思考"：装得下更长历史 + 更长的推理链）。
+        var defaultMaxCtxTokens: Int {
             switch self {
             case .tiny:   return 8192
             case .small:  return 16384
@@ -66,6 +68,12 @@ final class DeviceProfile: ObservableObject {
         let total = Double(bytes) / 1_073_741_824.0
         self.totalGB = max(total, 0.5)
         self.budgetGB = Self.recommended(for: self.totalGB)
+        // 上下文默认值取档位默认；用户设过就用用户设的（0 = 没设过）
+        let ud = UserDefaults.standard
+        let c = ud.integer(forKey: "rymind.ctxCap")
+        let x = ud.integer(forKey: "rymind.maxCtxCap")
+        self.ctxCapTokens     = (c == 0) ? tier.defaultCtxTokens     : c
+        self.maxCtxCapTokens  = (x == 0) ? tier.defaultMaxCtxTokens  : x
     }
 
     /// 推荐预算：给系统留 ~1.2GB 余量，且不超过总内存 65%
@@ -86,6 +94,39 @@ final class DeviceProfile: ObservableObject {
 
     /// 实际送进 llama 的 GPU 层数（关 Metal 就是 0）
     var effectiveGpuLayers: Int { metalEnabled ? tier.gpuLayers : 0 }
+
+    // MARK: - 上下文长度（与性能档位解耦）
+
+    /// 普通模式想用的上下文上限（用户在「高级」页调，持久化）
+    @Published var ctxCapTokens: Int = 8192 {
+        didSet { UserDefaults.standard.set(ctxCapTokens, forKey: "rymind.ctxCap") }
+    }
+
+    /// Max 模式想用的上下文上限（同上）
+    @Published var maxCtxCapTokens: Int = 16384 {
+        didSet { UserDefaults.standard.set(maxCtxCapTokens, forKey: "rymind.maxCtxCap") }
+    }
+
+    /// 这台设备**装得下**的上下文天花板（只按真实物理内存算）。
+    /// ⚠️ 故意不读 budgetGB —— 内存预算是性能调节项，调它不该牵连上下文长度。
+    /// 系统常驻 + UI 大约留 1.25GB；KV cache 每 1k token 约占权重的 0.16 倍（fp16 半精度）。
+    func memoryContextCeiling(weightGB: Double) -> Int {
+        let headroom = 1.25
+        let kvTotal = max(0.30, totalGB - weightGB - headroom)
+        let per1K   = max(0.030, weightGB * 0.16)
+        return max(512, Int(kvTotal / per1K * 1000))
+    }
+
+    /// 最终送进模型的上下文 = min(用户想要的, 模型自身支持的上限, 这台设备装得下的)
+    /// - weightGB: 这个模型的量化权重体积
+    /// - requested: 用户/Max 想要的长度
+    /// - modelMax:  模型文件自己支持的窗口（GGUF 训练窗口，超过就是paper-long没意义）
+    func resolveContext(weightGB: Double, requested: Int, modelMax: Int = 32768) -> Int {
+        let byMem = memoryContextCeiling(weightGB: weightGB)
+        let cap = min(modelMax, byMem, 65536)
+        let want = max(512, requested)
+        return max(512, min(want, cap))
+    }
 
     /// 进程实际物理内存占用（GB）
     var footprintGB: Double {
