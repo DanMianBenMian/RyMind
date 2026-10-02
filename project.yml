@@ -16,8 +16,14 @@ targets:
       path: Info.plist
       properties:
         CFBundleDisplayName: RyMind
-        CFBundleShortVersionString: "0.4.7"
-        CFBundleVersion: "12"
+        CFBundleShortVersionString: "0.4.8"
+        CFBundleVersion: "13"
+        # 快捷指令入口（rymind://models / rymind://chat / rymind://newchat）
+        CFBundleURLTypes:
+          - CFBundleTypeRole: Viewer
+            CFBundleURLName: com.research.rymind
+            CFBundleURLSchemes:
+              - rymind
         LSRequiresIPhoneOS: true
         UIRequiredDeviceCapabilities:
           - arm64
