@@ -33,6 +33,34 @@ jobs:
           echo "--- libs ---";    ls -1 llama-libs
           echo "--- headers ---"; ls -1 llama-include | head -20
 
+      - name: Build stable-diffusion.cpp static lib (iOS arm64, Metal 走 llama 那份 ggml)
+        run: |
+          set -e
+          # 钉死 commit，防止 master API 变动把构建搞炸
+          git clone https://github.com/leejet/stable-diffusion.cpp.git sd-src
+          cd sd-src
+          git checkout 3f8527a46c54ecf4cb4ed6003da8e8982283c73c
+          git submodule update --init --recursive --depth 1
+          cd ..
+          cmake -S sd-src -B sd-build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=18.0 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO \
+            -DSD_BUILD_EXAMPLES=OFF -DSD_BUILD_TESTS=OFF -DSD_BUILD_SERVER=OFF \
+            -DSD_METAL=ON -DGGML_METAL=ON -DGGML_METAL_EMBED_LIBRARY=ON \
+            -DGGML_BLAS=OFF -DGGML_ACCELERATE=OFF -DGGML_LLAMAFILE=OFF \
+            -DBUILD_SHARED_LIBS=OFF
+          cmake --build sd-build --config Release --target stable-diffusion -j$(sysctl -n hw.ncpu)
+          mkdir -p sd-libs sd-include
+          # ⚠️ 只取 libstable-diffusion.a：ggml 系列统一用 llama-libs 里那份，两份 ggml 会撞符号
+          find sd-build -name "libstable-diffusion.a" -exec cp {} sd-libs/ \;
+          cp sd-src/include/*.h sd-include/
+          echo "--- sd libs ---";    ls -1 sd-libs
+          echo "--- sd headers ---"; ls -1 sd-include
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
