@@ -329,7 +329,15 @@ final class LlamaEngine: ObservableObject {
             if nPrompt <= limit || turns.isEmpty { break }
             turns.removeFirst()
         }
+        // ⚠️⚠️ v0.4.6 修的第三个大 bug：老代码只定义了 pTokens 却**从没 tokenize 填值**，
+        // 喂给 llama_decode 的全是 token 0 → 模型根本没看到「你好」，
+        // 只能按预训练语料瞎续（表现就是"不管问什么都吐代码/吐文档"）。
+        // 这里必须真的 tokenize，参数和 tokenCount() 完全一致（parse_special=false, add_special=true）。
         var pTokens = [llama_token](repeating: 0, count: cap)
+        let nTok = text.withCString { p in
+            llama_tokenize(v, p, Int32(text.utf8.count), &pTokens, Int32(cap), false, true)
+        }
+        nPrompt = nTok > 0 ? Int(nTok) : 0
         guard nPrompt > 0, nPrompt < cap else {
             DispatchQueue.main.async {
                 self.isGenerating = false
@@ -341,6 +349,11 @@ final class LlamaEngine: ObservableObject {
         DispatchQueue.main.async { self.ctxUsed = nPrompt }
 
         // 提示词分块喂（超过 batch 上限就拆成几次 decode），避免长提示词 decode 失败
+        // ⚠️⚠️ v0.4.6 修的崩溃源头：第三参是 n_seq_max（每 token 的 seq_id 数组长度）。
+        // 传 0 时 llama.cpp 里 seq_id[i] = malloc(0) 是**零长分配**，
+        // 下一行 batch.seq_id[k]![0] = 0 就是 8 字节堆越界写 → 堆被踩坏，
+        // 之后任何一次 malloc/free 都可能随机炸 —— 这就是"生图概率闪退"的真身（不在生图代码里）。
+        // 必须传 1，让分配的数组真的有一个槽位。
         let chunk = Int32(min(nPrompt, 2048))
         var decodeOK = true
         var fed = 0
@@ -411,7 +424,7 @@ final class LlamaEngine: ObservableObject {
                 produced += 1
             }
 
-            var b = llama_batch_init(1, 0, 1)
+            var b = llama_batch_init(1, 0, 1)   // 第三参 n_seq_max 必须是 1（见上面注释，传 0 是堆越界写）
             b.n_tokens = 1
             b.token[0] = next
             b.pos[0] = Int32(pos)
