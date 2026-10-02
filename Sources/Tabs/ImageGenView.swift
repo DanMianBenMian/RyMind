@@ -149,7 +149,7 @@ struct ImageGenView: View {
 
                     // 模式状态：让用户知道这次跑的是真模型还是兜底涂鸦
                     Text(useModel
-                         ? "模式：模型生图 · \(modelName) · 20 步 · 真扩散模型，\(sizes[sizeIdx] > 512 ? "768 太重自动降到 512" : "稍慢请耐心")"
+                         ? "模式：模型生图 · \(modelName) · \(RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB).maxSteps) 步 · 真扩散模型，\(sizes[sizeIdx] > RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB).maxSize ? "尺寸已按内存预算自动降" : "稍慢请耐心")"
                          : "模式：程序化涂鸦（兜底）· 生图模型未下载，去「库 → 生图模型」下载 SD 1.5（1.6GB）")
                         .font(.system(size: 10))
                         .foregroundStyle(RMTheme.textSub)
@@ -264,17 +264,23 @@ struct ImageGenView: View {
             note = "生图模型未就绪"; lock.release(.image)
             return
         }
-        let sd = sizes[sizeIdx] > 512 ? 512 : sizes[sizeIdx]   // 768 在 4GB 设备太重，钉死 ≤512
+        let raw = sizes[sizeIdx] > 512 ? 512 : sizes[sizeIdx]   // 768 在 4GB 设备太重，钉死 ≤512
+        // ⚠️ 内存预算真正生效：按「性能」页的预算推导安全尺寸/步数，夹到上限以内
+        let plan = RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB)
+        let sd = min(raw, plan.maxSize)
+        if !plan.note.isEmpty {
+            note = "内存预算紧，已自动调整：\(plan.note)"
+        }
         // ⚠️ 内存纪律：聊天模型必须先卸载（两者不能同时进内存）；聊天页发消息会自动重新加载
         LlamaEngine.shared.unload()
-        RMTrace.shared.log("生图(模型)开始 model=\(m.id) size=\(sd) ref=\(ref != nil) seed=\(seed)", tag: "image")
+        RMTrace.shared.log("生图(模型)开始 model=\(m.id) size=\(sd) steps=\(plan.maxSteps) ref=\(ref != nil) seed=\(seed) 预算=\(String(format: "%.1f", DeviceProfile.shared.budgetGB))GB", tag: "image")
 
         RMSDEngine.shared.generate(
             modelPath: store.localPath(for: m),
             prompt: prompt,
             negative: "blurry, low quality, watermark, text, deformed",
             reference: ref,
-            size: sd, steps: 20, cfg: 7.0, seed: seed,
+            size: sd, steps: plan.maxSteps, cfg: 7.0, seed: seed,
             onProgress: { p, s in
                 self.progress = p
                 self.stage = s
