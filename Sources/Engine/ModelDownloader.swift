@@ -12,6 +12,19 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
     private var tasks: [String: URLSessionDownloadTask] = [:]
     private var resumeData: [String: Data] = [:]
     private var triedMirror: Set<String> = []
+    /// 每个下载上一次上报的进度（值, 时间）—— 用来节流
+    private var lastReported: [String: (Double, Date)] = [:]
+    private var lastMsgAt: Date = Date(timeIntervalSince1970: 0)
+
+    /// 进度/文案统一走节流：URLSession 的 didWriteData 一次大文件能打几百次，
+    /// 每次都 @Published 会让整个列表重绘 —— 进度条一闪一闪、滑动都卡就是这么来的。
+    private func setMessage(_ s: String) {
+        let now = Date()
+        guard now.timeIntervalSince(lastMsgAt) >= 0.3 else { return }
+        lastMsgAt = now
+        let text = s
+        DispatchQueue.main.async { self.lastMessage = text }
+    }
 
     /// 后台下载全部结束时的系统回调（AppDelegate 里存进来）
     var backgroundCompletionHandler: (() -> Void)?
@@ -30,7 +43,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         guard tasks[m.id] == nil else { return }
         let urlString = triedMirror.contains(m.id) ? m.mirrorURL : (m.primaryURL ?? m.mirrorURL)
         guard !urlString.isEmpty, let u = URL(string: urlString) else {
-            DispatchQueue.main.async { self.lastMessage = "\(m.name) 暂无可用下载源" }
+            setMessage("\(m.name) 暂无可用下载源")
             return
         }
         var req = URLRequest(url: u)
@@ -38,11 +51,12 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         let t = session.downloadTask(with: req)
         t.taskDescription = m.id
         tasks[m.id] = t
+        lastReported[m.id] = (0, Date())
         DispatchQueue.main.async {
             self.downloadingIds.insert(m.id)
             self.progress[m.id] = 0
-            self.lastMessage = "开始下载 \(m.name)"
         }
+        setMessage("开始下载 \(m.name)")
         t.resume()
     }
 
@@ -51,9 +65,11 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         t.cancel { [weak self] data in
             guard let self = self else { return }
             self.resumeData[id] = data
+            self.lastReported.removeValue(forKey: id)
             DispatchQueue.main.async { self.downloadingIds.remove(id) }
         }
         tasks[id] = nil
+        lastReported.removeValue(forKey: id)
     }
 
     func resume(_ id: String) {
@@ -73,6 +89,7 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         tasks[id] = nil
         resumeData[id] = nil
         triedMirror.remove(id)
+        lastReported.removeValue(forKey: id)
         DispatchQueue.main.async {
             self.downloadingIds.remove(id)
             self.progress[id] = nil
@@ -86,7 +103,17 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                     totalBytesExpectedToWrite: Int64) {
         guard let id = downloadTask.taskDescription, totalBytesExpectedToWrite > 0 else { return }
         let p = Double(totalBytesWritten) / Double(totalBytesExpectedToWrite)
-        DispatchQueue.main.async { self.progress[id] = p }
+        let now = Date()
+        if let prev = lastReported[id] {
+            // 跨过 0.5% 才报，或者 0.8 秒才报一次（既跟得上，又不刷爆主线程）
+            guard (p - prev.0) >= 0.005 || now.timeIntervalSince(prev.1) >= 0.8 else { return }
+        }
+        lastReported[id] = (p, now)
+        let np = p
+        DispatchQueue.main.async {
+            guard abs((self.progress[id] ?? 0) - np) >= 0.002 else { return }
+            self.progress[id] = np
+        }
     }
 
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -100,16 +127,17 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         try? fm.removeItem(atPath: dest)
         do {
             try fm.moveItem(atPath: location.path, toPath: dest)
+            lastReported.removeValue(forKey: id)
             DispatchQueue.main.async {
                 self.downloadingIds.remove(id)
                 self.progress[id] = nil
                 self.triedMirror.remove(id)
                 self.resumeData[id] = nil
                 ModelStore.shared.refreshStates()
-                self.lastMessage = "\(m.name) 下载完成"
             }
+            setMessage("\(m.name) 下载完成")
         } catch {
-            DispatchQueue.main.async { self.lastMessage = "保存失败：\(error.localizedDescription)" }
+            setMessage("保存失败：\(error.localizedDescription)")
         }
     }
 
@@ -119,18 +147,17 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         let ns = error as NSError
         if ns.code == NSURLErrorCancelled { return }   // 暂停导致的取消，不算失败
 
-        DispatchQueue.main.async {
-            self.downloadingIds.remove(id)
-            if !self.triedMirror.contains(id),
-               let m = ModelStore.shared.model(id: id),
-               m.primaryURL != nil {
-                // 主源挂了 → 自动切镜像源重试一次
-                self.triedMirror.insert(id)
-                self.lastMessage = "主源失败，切换镜像源重试：\(m.name)"
-                self.start(m)
-            } else {
-                self.lastMessage = "下载失败：\(error.localizedDescription)"
-            }
+        lastReported.removeValue(forKey: id)
+        let canFallback = !triedMirror.contains(id),
+            model = ModelStore.shared.model(id: id),
+            hasPrimary = model?.primaryURL != nil,
+            name = model?.name ?? id
+        if canFallback, hasPrimary {
+            triedMirror.insert(id)
+            setMessage("主源失败，切换镜像源重试：\(name)")
+            if let m = model { start(m) }
+        } else {
+            setMessage("下载失败：\(error.localizedDescription)")
         }
     }
 
