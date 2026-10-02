@@ -148,9 +148,7 @@ struct ImageGenView: View {
                     }
 
                     // 模式状态：让用户知道这次跑的是真模型还是兜底涂鸦
-                    Text(useModel
-                         ? "模式：模型生图 · \(modelName) · \(RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB).maxSteps) 步 · 真扩散模型，\(sizes[sizeIdx] > RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB).maxSize ? "尺寸已按内存预算自动降" : "稍慢请耐心")"
-                         : "模式：程序化涂鸦（兜底）· 生图模型未下载，去「库 → 生图模型」下载 SD 1.5（1.6GB）")
+                    Text(modeHint)
                         .font(.system(size: 10))
                         .foregroundStyle(RMTheme.textSub)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -213,6 +211,17 @@ struct ImageGenView: View {
         }
     }
 
+
+    // MARK: - 模式文案（抽出来，避免 body 里超长三元表达式把编译器类型检查卡爆）
+
+    private var modeHint: String {
+        guard useModel else {
+            return "模式：程序化涂鸦（兜底）· 生图模型未下载，去「库 → 生图模型」下载 SD 1.5（1.6GB）"
+        }
+        let plan = RMSDEngine.sdPlan(budgetGB: DeviceProfile.shared.budgetGB)
+        let downsized = sizes[sizeIdx] > plan.maxSize
+        return "模式：模型生图 · \(modelName) · \(plan.maxSteps) 步 · 真扩散模型，\(downsized ? "尺寸已按内存预算自动降" : "稍慢请耐心")"
+    }
 
     // MARK: - 生成
 
