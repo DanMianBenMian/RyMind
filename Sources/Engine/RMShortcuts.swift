@@ -122,7 +122,7 @@ final class RMShortcuts: ObservableObject {
             if !survived || loadFail {
                 let msg = "「\(m.name)」加载失败：内存不够或文件损坏（加载崩溃被兜底接住）"
                 RMTrace.shared.log(msg, tag: "crash")
-                publish(msg, short: "加载失败")
+                self.publish(msg, short: "加载失败")
                 return
             }
             let sys = "你是 RyMind 的本地助手，跑在 iPad 上、全程离线。用简体中文、Natural、口语化地回答；一次三五句话，别输出代码，别编造。"
@@ -133,10 +133,10 @@ final class RMShortcuts: ObservableObject {
             let body = ranOK ? out : ""
             RMTrace.shared.log("快捷指令 chat 完成 ranOK=\(ranOK) 字数=\(body.count)", tag: "chat")
             if body.isEmpty {
-                publish("（\(m.name) 这次没吐出东西；换个问法或换个模型）", short: "没输出")
+                self.publish("（\(m.name) 这次没吐出东西；换个问法或换个模型）", short: "没输出")
                 return
             }
-            publish(body, short: "回答已复制到剪贴板（\(body.count) 字）")
+            self.publish(body, short: "回答已复制到剪贴板（\(body.count) 字）")
         }
     }
 
