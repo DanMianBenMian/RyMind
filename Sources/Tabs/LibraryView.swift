@@ -102,6 +102,15 @@ struct LibraryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
             ForEach(store.llmModels) { m in modelRow(m) }
+            // 生图模型分区（SD 走 stable-diffusion.cpp，下载后生图页自动切「模型生图」）
+            if !store.imageModels.isEmpty {
+                Text("生图模型")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(RMTheme.textSub)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 4)
+                ForEach(store.imageModels) { m in modelRow(m) }
+            }
         }
     }
 
@@ -158,7 +167,9 @@ struct LibraryView: View {
             .font(.system(size: 12))
         } else if m.state == .ready {
             HStack(spacing: 12) {
-                if store.currentLLMId == m.id {
+                let inUse = (m.kind == .llm && store.currentLLMId == m.id)
+                         || (m.kind == .image && store.currentImageId == m.id)
+                if inUse {
                     Text("使用中").foregroundStyle(RMTheme.accent)
                 } else {
                     Button("切换") { store.select(m) }.foregroundStyle(RMTheme.accent)
