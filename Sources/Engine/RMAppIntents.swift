@@ -113,20 +113,30 @@ struct ChatWithModelIntent: AppIntent {
 
 @available(iOS 16, *)
 struct RyMindAppShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        [
-            AppShortcut(intent: GetModelsIntent(),
-                        phrases: ["获取 RyMind 模型列表", "RyMind 模型列表"],
-                        shortTitle: "模型列表",
-                        systemImageName: "list.bullet"),
-            AppShortcut(intent: NewChatIntent(),
-                        phrases: ["用 RyMind 新建会话", "RyMind 新会话"],
-                        shortTitle: "新建会话",
-                        systemImageName: "plus.bubble"),
-            AppShortcut(intent: ChatWithModelIntent(),
-                        phrases: ["用 RyMind 发消息", "RyMind 发消息"],
-                        shortTitle: "发消息",
-                        systemImageName: "bubble.left.and.bubble.right")
-        ]
+    static var appShortcuts: AppShortcut {
+        AppShortcut(intent: GetModelsIntent(),
+                    phrases: ["获取 RyMind 模型列表", "RyMind 模型列表"],
+                    shortTitle: "模型列表",
+                    systemImageName: "list.bullet")
+    }
+}
+
+@available(iOS 16, *)
+struct RyMindNewChatShortcuts: AppShortcutsProvider {
+    static var appShortcuts: AppShortcut {
+        AppShortcut(intent: NewChatIntent(),
+                    phrases: ["用 RyMind 新建会话", "RyMind 新会话"],
+                    shortTitle: "新建会话",
+                    systemImageName: "plus.bubble")
+    }
+}
+
+@available(iOS 16, *)
+struct RyMindChatShortcuts: AppShortcutsProvider {
+    static var appShortcuts: AppShortcut {
+        AppShortcut(intent: ChatWithModelIntent(),
+                    phrases: ["用 RyMind 发消息", "RyMind 发消息"],
+                    shortTitle: "发消息",
+                    systemImageName: "bubble.left.and.bubble.right")
     }
 }
